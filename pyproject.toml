@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gporeu"
+version = "1.0.0"
+description = "GPU pore characterization for porous crystals (volumes, FFV, surface area, PLD/LCD, pore network, CH4 energy grids)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Proprietary" }
+authors = [{ name = "GPoreU developers" }]
+keywords = ["mof", "porous-materials", "pore-analysis", "pld", "lcd",
+            "gpu", "triton"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Environment :: GPU :: NVIDIA CUDA",
+]
+dependencies = [
+    "numpy",
+    # CUDA-enabled PyTorch; it pins/bundles the matching Triton version,
+    # so Triton is intentionally not constrained here
+    "torch",
+]
+
+[project.optional-dependencies]
+# fallback CIF parser (Open Babel) for files carrying non-identity
+# symmetry operations; the built-in fast parser covers plain P1/identity
+# structures without it
+cif-sym = ["openbabel-wheel"]
+test = ["pytest"]
+
+[project.scripts]
+gporeu = "gporeu.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+gporeu = ["settings.example.json"]
