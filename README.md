@@ -100,6 +100,11 @@ Important: `energy.images` must stay `true` when any cell width is below
 
 ## Programmatic use
 
+Runnable, annotated examples for both interfaces live in
+[`examples/`](examples/README.md): single CIF and directory batches (Python
+and CLI), method selection / turning calculations off, and grid dumps.
+Quick version:
+
 ```python
 from gporeu.cli import run_one, DEFAULT_CONFIG, format_summary
 from pathlib import Path

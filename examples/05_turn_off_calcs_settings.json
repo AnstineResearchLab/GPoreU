@@ -1,0 +1,13 @@
+{
+  "_comment": "Settings that turn OFF selected calculations: the 'methods' list is the master switch. Here the energy grid/histogram, pore network and surface area are switched off; everything geometric stays. (-m on the command line overrides this list.)",
+
+  "methods": ["porosity", "percolation", "ffv", "pore_size_distribution",
+              "pld", "lcd"],
+
+  "_turned_off": "energy_histogram (skips the CH4 energy grid too), pore_network (skips H-maxima + watershed flooding), surface_area (skips the MC SASA sampling)",
+
+  "output": {
+    "_comment": "grid arrays are NOT written unless save_grids is true (--save-grids also enables). See example 06.",
+    "save_grids": false
+  }
+}
