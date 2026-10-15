@@ -10,19 +10,24 @@ _VERBOSE = os.environ.get('GPOREU_VERBOSE') == '1'
 
 
 def vprint(*args, **kw):
-    # diagnostics (tensor reprs cost milliseconds each); enable with
-    # GPOREU_VERBOSE=1
+    """Print stage diagnostics; active only with GPOREU_VERBOSE=1.
+
+    (Tensor reprs cost milliseconds each, so they are kept behind this
+    gate by default.)
+    """
     if _VERBOSE:
         print(*args, **kw)
 _last = [None]
 
 
 def reset():
+    """Reset the profiler clock (call before a new stage sequence)."""
     if _PROF:
         _last[0] = None
 
 
 def mark(name):
+    """Record the interval since the previous mark (GPOREU_PROFILE=1)."""
     if not _PROF:
         return
     torch.cuda.synchronize()

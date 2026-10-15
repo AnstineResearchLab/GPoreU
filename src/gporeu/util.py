@@ -1,3 +1,12 @@
+"""
+Structure input and pipeline preparation.
+
+CIF reading (fast built-in P1 parser, with an Open Babel fallback for
+symmetry-expanded files), analysis-grid generation, and packing of
+force-field and probe constants into the dict consumed by every pipeline
+stage.
+"""
+
 import math
 import torch
 from . import force_fields
@@ -16,8 +25,7 @@ from openbabel import openbabel as ob
 ob.obErrorLog.StopLogging()
 
 
-# BORROWED FROM ASE
-
+# Chemical symbols indexed by atomic number (table adapted from ASE).
 chemical_symbols = [
     # 0
     'X',
@@ -47,6 +55,12 @@ chemical_symbols = [
 
 
 def fill_uc(coord, numbers, cell,  charges, types, sg='P 1'):
+
+    """Expand the asymmetric unit to the full unit cell using Open
+        Babel symmetry handling; returns
+        (coord, numbers, charges, types, cell).
+    """
+
     coord = np.array(coord).reshape(-1, 3).tolist()
     numbers = np.array(numbers).reshape(-1).tolist()
     cell = np.array(cell).reshape(3, 3).tolist()
@@ -92,9 +106,11 @@ def _symbol_to_z(sym, label):
 
 
 def _fast_read_cif(fpath):
-    """Fast path for plain P1 CIFs (no symmetry operators): replicates
-    pybel + fill_uc output to within 1 ulp-double (verified on the full
-    verification set).  Returns (coord, numbers, types, charges, cell)."""
+    """Fast parser for plain P1 CIFs (no symmetry operators).
+
+    Replicates the pybel + fill_uc result to within 1 ulp (double
+    precision).  Returns (coord, numbers, types, charges, cell).
+    """
     txt = open(fpath).read().split('\n')
     par, rows, cols = {}, [], None
     i, n = 0, len(txt)
@@ -222,11 +238,13 @@ def _fast_read_cif(fpath):
 
 
 def read_cif(fpath, _id=None, check_duplicates=True):
+    """Read a CIF structure; returns (coord, numbers, types, charges, cell).
 
-    ''' FAST PATH: plain P1 CIFs parse ~10-30x faster than
-    Open Babel, bit-compatible through float32 (see _fast_read_cif).
-    Anything with symmetry operators (or a parse hiccup) falls through
-    to the original Open Babel route below. '''
+    Plain P1 CIFs are handled by a fast built-in parser that matches the
+    Open Babel route exactly through float32 conversion (see
+    :func:`_fast_read_cif`); files carrying non-identity symmetry
+    operations -- or any parse hiccup -- fall through to Open Babel.
+    """
     try:
         raw = open(fpath).read()
         if not any(tag in raw for tag in _SYMMETRY_TAGS):
@@ -234,14 +252,14 @@ def read_cif(fpath, _id=None, check_duplicates=True):
     except Exception:
         pass
 
-    ''' ------------- INIT OUTPUT DATA --------------- '''
+    # Initialize outputs.
     cell = []
     coord = []
     numbers = []
     types = []
     charges = []
 
-    ''' ------------- PARSE UNIT CELL ------------ '''
+    # Parse the unit-cell vectors.
     mol = next(pybel.readfile('cif', fpath))
     cell_matrix = mol.unitcell.GetCellMatrix()
     for i in range(3):
@@ -259,7 +277,7 @@ def read_cif(fpath, _id=None, check_duplicates=True):
         except:
             charges.append(0.0)
 
-    ''' ------------- APPLY SYMMETRY --------------- '''
+    # Apply symmetry expansion (Open Babel path).
     space_group = mol.unitcell.GetSpaceGroup().GetHallName()
     coord, numbers, charges, types, cell = fill_uc(coord,
                                                     numbers,
@@ -272,17 +290,22 @@ def read_cif(fpath, _id=None, check_duplicates=True):
 
 def init_grid(cell, coord, spacing):
 
-    ''' ------------- # OF GRID POINTS PER DIM --------------- '''
-    ''' ---- COUNT AND STEP ALONG THE LATTICE VECTORS: the row lengths ------ '''
-    ''' ---- |a|,|b|,|c|, NOT the cartesian diagonal entries cell[i,i];   ---- '''
-    ''' ---- for tilted cells the diagonals are projections and would    ---- '''
-    ''' ---- coarsen the grid along the axis and drop planes.            ---- '''
+    """Create a nearly-uniform grid of the requested spacing over the
+        cell; returns (Cartesian points, nx, ny, nz, trials).
+    """
+
+
+    # Number of grid points per dimension.
+    # Step along the LATTICE vectors: the row lengths |a|, |b|, |c|,
+    # NOT the Cartesian diagonal entries cell[i, i]: for tilted
+    # cells the diagonals are projections, which would coarsen the
+    # grid along the axis and drop planes.
     lengths = torch.linalg.norm(cell, dim=1)
     nx =  int(lengths[0] / spacing)
     ny =  int(lengths[1] / spacing)
     nz =  int(lengths[2] / spacing)
 
-    ''' ------------- EVEN SPACING IN FRAC COORD ------------- '''
+    # Uniform spacing in fractional coordinates.
     underfrac = (lengths[0] - nx*spacing) / lengths[0]
     _x = torch.linspace(0, 1-underfrac, nx+1)
     underfrac = (lengths[1] - ny*spacing) / lengths[1]
@@ -291,7 +314,7 @@ def init_grid(cell, coord, spacing):
     _z = torch.linspace(0, 1-underfrac, nz+1)    
     x, y, z = torch.meshgrid(_x, _y, _z,   indexing='ij')
 
-    ''' ------------- MAKE MESH BY STACKING --------------- '''
+    # Build the full mesh.
     x = x.flatten().reshape(-1,1)
     y = y.flatten().reshape(-1,1)
     z = z.flatten().reshape(-1,1)
@@ -302,23 +325,28 @@ def init_grid(cell, coord, spacing):
 
 def prepare_input(fname, spacing): 
 
-    ''' ------------- READ CIF FILE --------------- '''
+    """Read a CIF and build the complete pipeline input dict: structure
+        tensors, analysis grid, force-field parameters and probe constants.
+    """
+
+
+    # Read the CIF structure.
     coord, numbers, types, charges, cell = read_cif(fname)
 
-    ''' ------------- CONVERT CIF INFO TO TENSORS --------------- '''
+    # Convert structure info to tensors.
     coord   = torch.tensor(coord   , device='cuda', dtype=torch.float32)
     numbers = torch.tensor(numbers , device='cuda', dtype=torch.long)
     charges = torch.tensor(charges , device='cuda', dtype=torch.float32)
     cell    = torch.tensor(cell    , device='cuda', dtype=torch.float32)
 
-    ''' ------------- CREATE GRID FROM CIF INFO --------------- '''
+    # Create the analysis grid.
     grid, nx, ny, nz,trials = init_grid(cell, coord, spacing)
     psd_cycles = torch.tensor([10000], dtype=torch.long, device='cuda')
     bin_size = 0.25
     max_pore = torch.tensor([20], dtype=torch.float32, device='cuda')
     wall_thickness= torch.tensor([1], dtype=torch.float32, device='cuda')
 
-    ''' ---------- DEFAULT SIG AND EPS FOR HE AND N ----------- '''
+    # Probe constants (He, N2, CH4).
     UFF     =  force_fields.UFF().to('cuda')
     MASS    =  force_fields.MASS().to('cuda')
     mass    =  MASS(numbers).sum()
@@ -327,7 +355,6 @@ def prepare_input(fname, spacing):
   
     sigmas  , epsilons   = UFF(numbers)
 
-    #he_sigma, he_epsilon = UFF(torch.tensor([2] , device='cuda'))
     he_sigma             = torch.tensor([2.58]  , device='cuda')
     he_epsilon           = torch.tensor([10.22] , device='cuda')
     n_sigma              = torch.tensor([3.314]  , device='cuda')
@@ -336,12 +363,11 @@ def prepare_input(fname, spacing):
     probe_epsilon        = torch.tensor([148.0] , device='cuda')
     
     epsilons   /= 1.987e-3 # TEMPERATURE UNITS
-    #he_epsilon /= 1.987e-3 # TEMPERATURE UNITS
 
     for num in torch.unique(numbers):
        mask = numbers == num
        prof.vprint("atomic number:", num.item(), "sigma:", sigmas[mask][0].item(), "epsilon K:", epsilons[mask][0].item())
-    ''' ------------- PACK TO DICT AND RETURN --------------- '''
+    # Pack results into the input dict.
     _input = dict(coord        =        coord, # FRAMEWORK
                   numbers      =      numbers, # FRAMEWORK
                   charges      =      charges, # FRAMEWORK
@@ -371,6 +397,10 @@ def prepare_input(fname, spacing):
 
 
 def cif_2_xyz(f_in, f_out):
+
+    """Convert a CIF file to XYZ via Open Babel (utility).
+    """
+
     coord, numbers, types, charges, cell = read_cif(f_in)
     f = open(f_out, 'w')
     f.write(str(len(coord)) + '\n')

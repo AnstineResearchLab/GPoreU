@@ -1,34 +1,26 @@
 """
-PLD_new.py -- Pore Limiting Diameter (production entry point).
+Pore Limiting Diameter (PLD) and largest cavity diameter (LCD).
 
-The historical two-MST algorithm (no periodic bonds in the spanning forest,
-face-to-face widest path, and a -1.0-weight closing edge that clamped the
-reported PLD to 2.0 A whenever the true bottleneck radius exceeded 1 A) has
-been replaced by the winding-vector union-find of uf_pld.py, executed on
-the GPU via the Triton kernels of uf_pld_triton.py (exact parallel-Boruvka
-maximum spanning forest + one-pass winding scoring; 25-165x faster than the
-vectorized reference, bit-identical results):
+The PLD is computed with the winding-vector union-find of
+:mod:`gporeu.winding_pld`:
 
-  PLD_d = 2 x (highest bottleneck radius admitting a non-contractible cycle
-               of free volume along lattice axis d)
+    PLD_d = 2 x (highest bottleneck radius admitting a non-contractible
+                 cycle of free volume along lattice axis d)
 
-which is the exact "largest sphere with an infinite periodic pathway"
-criterion.  It consumes the same GPoreU pipeline fields as before
-(grid_radaii, ij_geo, ij_geo_periodic, geo_grid_occ, nx, ny, nz) and
-returns the same keys (pld_x, pld_y, pld_z) plus extras; see
-PLD_new_mst_legacy.py for the replaced implementation.
-
-Validation (verification/ in the dev tree): PoreBlazer-log agreement within
-0.07 A threshold-to-threshold on the validated set {WEI (tilted triclinic,
-D=2), IRMOF1 (cubic, D=3)}; LCD within 0.15 A; regression battery
-test_uf.py green, including an independent lifted-space BFS oracle.
+which is the exact "largest sphere with a periodic transport pathway"
+criterion.  It consumes the pipeline fields produced by the grid and
+connectivity stages (``grid_radaii``, ``ij_geo``, ``ij_geo_periodic``,
+``geo_grid_occ``, ``nx``, ``ny``, ``nz``) and returns per-axis
+diameters, the overall PLD (PoreBlazer semantics: percolation along at
+least one direction), LCD, winding vectors and a connectivity
+dimension count.
 """
 
 import time
 
 import torch
 
-from .uf_pld_triton import pld_winding_fast as pld_winding
+from .winding_pld import pld_winding_fast as pld_winding
 
 
 def calculate_pld(_input):

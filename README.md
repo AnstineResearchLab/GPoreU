@@ -109,8 +109,13 @@ print(format_summary(data, Path('IRMOF1.cif'), DEFAULT_CONFIG,
                      DEFAULT_CONFIG['methods'], steps, timings))
 ```
 
-`data` is the pipeline dict (all intermediate grids and results).
-The legacy single-structure driver remains available as `gporeu.run`.
+`data` is the pipeline dict (all intermediate grids and results).  The
+modules are deliberately self-explanatory: `grid` (voxelization),
+`percolate` (connectivity, percolation, volumes), `psd_ffv` (pore size
+distribution / free volume), `surface_area`, `pore_network` +
+`watershed` (pore network), `pld` + `winding_pld` + `union_find`
+(PLD/LCD), `energy` (CH4 grids and 2D histogram), `util` (CIF input and
+grid preparation), `force_fields`, and `prof` (opt-in diagnostics).
 
 ## Reproducibility & diagnostics
 

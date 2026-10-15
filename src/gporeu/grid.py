@@ -1,3 +1,13 @@
+"""
+Lattice construction: voxelization of the void space.
+
+Computes, for every grid point, the minimum distance to the framework, hard-sphere
+(geometric) occupancy and soft (LJ-band) accessibility for the He and N2
+probes, and derives the occupancy/access masks and the free-radius field.
+This is the first stage of the characterization pipeline; all later
+stages consume its outputs.
+"""
+
 import torch
 import triton
 import triton.language as tl
@@ -23,25 +33,33 @@ def GPoreU_Lattice_Kernel(
                             n_epsilon_ptr
                          ):
 
-    '''------ 1 PID PER GRID POINT ------'''
+    """Lattice kernel, one program per grid point.
+
+        Computes for each grid point the hard-sphere (geometric) occupancy
+        flag, the soft LJ-band helium and N2 accessibility flags, and the
+        squared minimum distance to the framework, tiling over all framework
+        atoms with minimum-image displacements.
+    """
+
+
     pid = tl.program_id( 0 )
     if pid >= NGRID:
         return
     
-    '''--- LOAD He AND N PROBE PARAMS ---'''
+    # Probe parameters.
     he_sigma   = tl.load( he_sigma_ptr   )
     he_epsilon = tl.load( he_epsilon_ptr )
     n_sigma    = tl.load( n_sigma_ptr    )
     n_epsilon  = tl.load( n_epsilon_ptr  )
 
-    '''--- LOAD GRID POINT COORDINATES --'''
+    # Coordinates of this grid point.
     a_off = pid * 3  # memory offset
     a0 = tl.load( grid_ptr + a_off + 0 ) # x
     a1 = tl.load( grid_ptr + a_off + 1 ) # y
     a2 = tl.load( grid_ptr + a_off + 2 ) # z
 
 
-    '''--- LINEAR SCALAR CELL LOADING ---'''
+    # Cell matrix and inverse (scalars).
     c00 = tl.load( cell_ptr + 0 )  
     c01 = tl.load( cell_ptr + 1 )  
     c02 = tl.load( cell_ptr + 2 )
@@ -61,7 +79,7 @@ def GPoreU_Lattice_Kernel(
     inv20 = tl.load( cell_ptr + 15 ) 
     inv21 = tl.load( cell_ptr + 16 ) 
     inv22 = tl.load( cell_ptr + 17 )
-    '''--- LINEAR SCALAR CELL LOADING ---'''
+    # Cell matrix and inverse (scalars).
  
     LARGE      = 1e10
     min_d      = LARGE
@@ -76,7 +94,7 @@ def GPoreU_Lattice_Kernel(
 
     offs_b = tl.arange( 0, 128 ) # WORK IN BLOCKS OF 128
     
-    '''--- LOOP OVER ALL ATOMS IN THE CELL ---'''
+    # Tile over the framework atoms.
     for start in range(0, NATOMS, 128):
         
         if geo_check == False:
@@ -84,57 +102,57 @@ def GPoreU_Lattice_Kernel(
             idx  = start + offs_b # MEMORY OFFSET FOR ATOM LOADING
             mask = idx < NATOMS   # MASK FOR OUT OF BOUNDS
     
-            '''--- LOAD A BLOCK OF ATOM COORDINATES ----'''
+            # Block of atom coordinates.
             b0 = tl.load( coord_ptr + idx * 3 + 0, mask=mask, other=0.0 )
             b1 = tl.load( coord_ptr + idx * 3 + 1, mask=mask, other=0.0 )
             b2 = tl.load( coord_ptr + idx * 3 + 2, mask=mask, other=0.0 )
    
-            '''--- LOAD SIGMAS AND EPSILONS OF ATOMS ---'''
+            # Block of LJ parameters.
             sigmas   = tl.load( sigmas_ptr  +  idx, mask=mask, other=0.0 )
             epsilons = tl.load( epsilons_ptr + idx, mask=mask, other=0.0 )
     
-            '''----- BLOCK OF DISPLACEMENT VECTORS -----'''
+            # Displacements (grid point - atom).
             dx = a0 - b0
             dy = a1 - b1
             dz = a2 - b2
     
-            '''---- BLOCK OF FRACTIONAL COORDINATES ----'''
-            ''' --- row-lattice convention: v = f @ C,  f = d @ inv(C)  ---- '''
+            # Fractional coordinates of the displacement.
+            # Row-lattice convention: v = f @ C, f = d @ inv(C).
             fx = inv00 * dx + inv10 * dy + inv20 * dz
             fy = inv01 * dx + inv11 * dy + inv21 * dz
             fz = inv02 * dx + inv12 * dy + inv22 * dz
     
     
-            '''------ TRITON FRIENDLY "ROUNDING" -------'''
+            # Minimum-image wrap of the fractional parts.
             fx = fx - tl.floor( fx + 0.5 )
             fy = fy - tl.floor( fy + 0.5 )
             fz = fz - tl.floor( fz + 0.5 )
 
-            '''-------- PERIODIC DISPLACEMENTS ---------'''
+            # Back to Cartesian displacements.
             dx_p = c00 * fx + c10 * fy + c20 * fz
             dy_p = c01 * fx + c11 * fy + c21 * fz
             dz_p = c02 * fx + c12 * fy + c22 * fz
     
-            '''------- WRAPPED SQUARED DISTANCE --------'''
+            # Squared wrapped distance.
             d2 = dx_p * dx_p + dy_p * dy_p + dz_p * dz_p
     
-            '''------ MASK DISTANCE OUT OF BOUNDS ------'''
+            # Mask out-of-range lanes.
             d2 = tl.where( mask, d2, LARGE )
     
-            '''----- ZERO LJ PARAMS OUT OF BOUNDS ------'''
+            # Zero out-of-range lanes.
             sigma_masked   = tl.where( mask,   sigmas, 0.0 )
             epsilon_masked = tl.where( mask, epsilons, 0.0 )
     
-            '''----- ZERO LJ PARAMS OUT OF BOUNDS ------'''
+            # Zero out-of-range lanes.
             s2    = sigma_masked * sigma_masked
 
-            '''----- GEOMETRIC ACCESSIBILITY CHECK -----'''
+            # Hard-sphere geometric overlap test.
             d_check = ( d2 < 0.25 * s2 ) # note this is squared verision of d < sig
             any_val = tl.max( d_check )
             if any_val == 1: # geo inaccessible grid point
                 geo_check = True 
             else:
-                '''----- DO HELIUM ACCESSIBILITY PART -----'''
+                # Helium probe: soft LJ accessibility.
                 if he_check == False:
                     s_he    = 0.5 * ( sigma_masked + he_sigma )
                     s2_he   = s_he * s_he
@@ -142,7 +160,7 @@ def GPoreU_Lattice_Kernel(
                     d_check = ( d2 < 0.25 * s2_he )
                     any_val = tl.max( d_check )
 
-                    '''----- LJ IF ACCESSIBLE -----'''
+                    # Soft accessibility via the LJ energy band.
                     if any_val == 1: # He inaccessible grid point
                         he_check = True
 
@@ -154,7 +172,7 @@ def GPoreU_Lattice_Kernel(
                         he_lj_energy  += tl.sum( he_eps * (s2_he_d2_12-s2_he_d2_6) )
 
 
-                '''----- DO NITROGEN ACCESSIBILITY PART -----'''
+                # N2 probe: soft LJ accessibility.
                 if n_check == False:
                     s_n     = 0.5 * ( sigma_masked + n_sigma )
                     s2_n    = s_n * s_n
@@ -162,7 +180,7 @@ def GPoreU_Lattice_Kernel(
                     d_check = ( d2 < s2_n )
                     any_val = tl.max( d_check )
 
-                    '''----- LJ IF ACCESSIBLE -----'''
+                    # Soft accessibility via the LJ energy band.
                     if any_val == 1: # N inaccessible grid point
                         n_check = True
 
@@ -173,13 +191,13 @@ def GPoreU_Lattice_Kernel(
                         s2_n_d2_12    = s2_n_d2_6 * s2_n_d2_6
                         n_lj_energy  += tl.sum( n_eps * (s2_n_d2_12-s2_n_d2_6) )
 
-                '''----- GET MIN D2 TO THE FRAMEWORK ------'''
+                # Track the minimum d^2 to the framework.
                 d = tl.sqrt(d2) - 0.5 * sigma_masked
                 block_min = tl.min( d )
                 if block_min < min_d: # update if block is less
                     min_d = block_min
 
-    '''----- STORE RESULTS TO OUTPUT MEMORY ------'''
+    # Store the results.
     if geo_check == False:
         tl.store( geo_grid_occ_ptr + pid, False ) # accessible
         tl.store( grid_radaii_ptr  + pid, min_d ) # store distance to nearest atom center
@@ -209,7 +227,15 @@ def GPoreU_Lattice_Kernel(
 
 def all_grids_pbc(_input):
 
-    ''' ------------- UNPACK DICT TO TENSORS ------------------ '''
+    """Construct the lattice grids for the prepared input.
+
+        Returns a dict with the free-radius field (``grid_radaii``), the
+        geometric/He/N2 occupancy masks and soft He/N2 LJ energy fields, and
+        the Boltzmann-weighted probe pore volumes.
+    """
+
+
+    # Unpack the pipeline dict.
     coord      =      _input['coord']
     grid       =       _input['grid']
     cell       =       _input['cell']
@@ -220,7 +246,7 @@ def all_grids_pbc(_input):
     epsilons   =   _input['epsilons']
     he_epsilon = _input['he_epsilon']
 
-    ''' ------------ ASSERTS TO VERIFY ALL CUDA --------------- '''
+    # Require CUDA tensors.
     assert      coord.is_cuda
     assert       grid.is_cuda
     assert       cell.is_cuda
@@ -231,14 +257,14 @@ def all_grids_pbc(_input):
     assert   epsilons.is_cuda
     assert he_epsilon.is_cuda
 
-    ''' -------- DEFAULTS AND CONVENIENT CELL FORMAT ---------- '''
+    # Flattened [cell | inv(cell)] for the kernel.
     NATOMS = coord.shape[0]
     NGRID  =  grid.shape[0]
     cell_inv = torch.linalg.inv(cell)
     cell_flat = torch.cat([cell.reshape(-1), 
                            cell_inv.reshape(-1)]).contiguous()
     
-    ''' ------------- INITIALIZE OUTPUT TENSORS --------------- '''
+    # Allocate outputs.
     grid_radaii   =  torch.empty(NGRID, device='cuda', dtype=torch.float32)
     geo_grid_occ  =     torch.empty(NGRID, device='cuda', dtype=torch.bool)
     he_grid_occ   =     torch.empty(NGRID, device='cuda', dtype=torch.bool)
@@ -246,7 +272,7 @@ def all_grids_pbc(_input):
     he_lj_energy  =  torch.empty(NGRID, device='cuda', dtype=torch.float32)
     n_lj_energy   =  torch.empty(NGRID, device='cuda', dtype=torch.float32)
 
-    ''' ------------- CALL FUSED KERNEL --------------- '''
+    # Launch the lattice kernel.
     GPoreU_Lattice_Kernel[(NGRID,)](
                                      coord,
                                      grid,
@@ -268,14 +294,14 @@ def all_grids_pbc(_input):
                                      num_warps=4
                                    )
 
-    ''' ------- NICE PLACE FOR PORE VOLUME CALC --------- '''
+    # Pore volumes: soft (Boltzmann-weighted LJ) probe volumes and the hard geometric volume.
     vol = _input['volume']
     he_pore_volume  = vol * ( -4 * he_lj_energy / 298.0 ).exp().sum() / NGRID
     n_pore_volume   = vol * ( -4 * n_lj_energy  / 298.0 ).exp().sum() / NGRID
     geo_pore_volume = vol * (~geo_grid_occ).sum() / NGRID
     
 
-    ''' ------------- PACK OUTPUT TO DICT --------------- '''
+    # Collect results.
     _out = dict(grid_radaii      =      grid_radaii,
                 geo_grid_occ     =     geo_grid_occ,
                 he_grid_occ      =      he_grid_occ,

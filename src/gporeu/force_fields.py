@@ -1,7 +1,19 @@
+"""
+Elementwise force-field lookup tables.
+
+UFF-derived Lennard-Jones sigma/epsilon and atomic masses, held as
+torch Modules for vectorized CUDA-friendly per-atom parameter lookup.
+"""
+
 import torch
 from torch import Tensor, nn
 
 class MASS(nn.Module):
+
+    """Atomic masses (g/mol) indexed by atomic number; forward returns
+        the per-atom mass tensor.
+    """
+
     def __init__(self):
         super().__init__()
 
@@ -39,6 +51,11 @@ class MASS(nn.Module):
 
 
 class UFF(nn.Module):
+
+    """UFF Lennard-Jones parameters indexed by atomic number; forward
+        returns per-atom sigma (Angstrom) and epsilon (kcal/mol).
+    """
+
     def __init__(self):
         super().__init__()
 

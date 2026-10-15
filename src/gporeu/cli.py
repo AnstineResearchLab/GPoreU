@@ -52,7 +52,7 @@ STEP_REQUIRES = {
     'grids':        [],
     'connectivity': ['grids'],
     'psd':          ['grids'],
-    'surface_area': ['grids'],
+    'surface_area': [],                         # only needs prepared input
     'network':      ['connectivity'],          # ij_geo + geo_access
     'pld':          ['connectivity'],          # consumes ij_geo adjacency
     'energy_grid':  ['grids'],                 # evaluated on grid points
@@ -71,7 +71,7 @@ def _step_connectivity(data, cfg):
 
 
 def _step_psd(data, cfg):
-    from .psdchanged import GPoreU_psd_ffv
+    from .psd_ffv import GPoreU_psd_ffv
     data.update(GPoreU_psd_ffv(data))
 
 
@@ -81,14 +81,14 @@ def _step_surface_area(data, cfg):
 
 
 def _step_network(data, cfg):
-    from .hmax_kernel import GPoreU_poreGraph
+    from .pore_network import GPoreU_poreGraph
     out = GPoreU_poreGraph(data, safe_buffer=cfg['pore_network']['safe_buffer'])
     if out is not None and out is not data:
         data.update(out)
 
 
 def _step_pld(data, cfg):
-    from .PLD_new import calculate_pld
+    from .pld import calculate_pld
     data.update(calculate_pld(data))
 
 
@@ -183,6 +183,10 @@ for _m, _d in METHODS.items():
 
 
 def resolve_method(name):
+
+    """Map a user method name or alias to its canonical method name.
+    """
+
     key = name.strip().lower()
     if key in METHODS:
         return key
@@ -233,6 +237,10 @@ DEFAULT_CONFIG = {
 
 
 def deep_merge(base, override):
+
+    """Recursively merge ``override`` onto ``base`` into a new dict.
+    """
+
     out = dict(base)
     for k, v in override.items():
         if isinstance(v, dict) and isinstance(out.get(k), dict):
@@ -243,6 +251,11 @@ def deep_merge(base, override):
 
 
 def load_config(path):
+
+    """Load a JSON settings file merged onto DEFAULT_CONFIG; keys
+        starting with '_' (documentation comments) are ignored.
+    """
+
     with open(path) as fh:
         cfg = json.load(fh)
     cfg = {k: v for k, v in cfg.items() if not k.startswith('_')}
@@ -261,6 +274,14 @@ PROBE_KEYS = {                     # config name -> data dict key
 # ---------------------------------------------------------------------------
 
 def run_one(cif_path, cfg, verbose=False):
+
+    """Run the auto-resolved pipeline on one CIF file.
+
+        Returns (data, steps, why, timings): the populated pipeline dict,
+        the executed step order, the per-step dependency explanation, and
+        per-step wall times in seconds.
+    """
+
     import torch
     from . import util
     torch.manual_seed(cfg['seed'])
@@ -316,6 +337,11 @@ def _fmt_flag(t):
 
 
 def format_summary(data, cif_path, cfg, requested, steps, timings):
+
+    """Format the human-readable characterization report for one
+        structure (also the content of NAME.summary).
+    """
+
     L = []
     W = 68
     vol = float(data['volume'].item())
@@ -450,6 +476,11 @@ GRID_DUMP_KEYS = {               # file key -> data key
 
 
 def save_grid(data, grid_path, cfg):
+
+    """Write the grid property arrays of one structure to FILE
+        (numpy npz format, or torch pt with grid_format='pt').
+    """
+
     import torch
     fmt = cfg['output']['grid_format']
     payload = {k: data[v].detach().cpu()
@@ -473,6 +504,11 @@ def save_grid(data, grid_path, cfg):
 # ---------------------------------------------------------------------------
 
 def expand_inputs(paths):
+
+    """Expand CLI inputs (CIF files and/or directories) into a sorted
+        list of existing CIF paths, skipping broken symlinks.
+    """
+
     cif_files = []
     for p in paths:
         p = Path(p)
@@ -503,6 +539,11 @@ def expand_inputs(paths):
 
 
 def list_methods():
+
+    """Print the method table with aliases and resolved step
+        dependencies.
+    """
+
     print('GPoreU methods (name = steps required):')
     for m in METHODS:
         steps, _ = plan_steps([m])
@@ -521,6 +562,11 @@ def list_methods():
 
 
 def main(argv=None):
+
+    """Command-line entry point; returns the process exit code
+        (0 success, 1 any structure failed, 2 no CUDA GPU).
+    """
+
     ap = argparse.ArgumentParser(
         prog='gporeu',
         description='GPoreU pore characterization for one CIF file or a '

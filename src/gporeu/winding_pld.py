@@ -1,9 +1,10 @@
 """
-uf_pld_triton.py -- Triton-optimized winding-vector PLD.
+Winding-vector PLD engine (Triton).
 
-Drop-in replacement for uf_pld.pld_winding (same inputs, outputs superset).
-Computes an EXACT maximum spanning forest with parallel Boruvka steps,
-then scores winding residuals once:
+Computes the pore limiting diameter exactly, per lattice axis, from the
+grid radius field and the periodic bond list by building an exact
+maximum spanning forest with parallel Boruvka steps and scoring winding
+residuals once:
 
     PLD_d = 2 * max{ w_e : g_e[d] != 0 },
     g_e   = P(v) - P(u) - W_e      (potentials over the maxST)
@@ -16,7 +17,6 @@ Why this equals the sequential-Kruskal first-event PLD:
        cycles of non-tree edges contained in C (cycle space; g is
        additive over homology), so winding(C) != 0 forces some e in C
        with g_e != 0 and w_e >= t.
-Verified bit-equal against the reference engine and a networkx maxST.
 
 Boruvka phase (five kernels, one tiny host sync per phase):
 
@@ -25,9 +25,8 @@ Boruvka phase (five kernels, one tiny host sync per phase):
                       there is no while-loop condition, no cross-warp
                       reduction, and identical semantics at any
                       BLOCK/num_warps.  A chain longer than `maxh` hops
-                      sets an overflow flag the driver turns into an
-                      exception (cannot happen when maxh exceeds the
-                      phase count, which bounds chain length).
+                      sets an overflow flag the driver turns into a
+                      budget doubling and retry.
   2. _best_kernel     scatter each edge's packed (weight_bits, edge_id)
                       via atomic_max into BOTH endpoint roots: the
                       heaviest crossing edge per component.  Also counts
@@ -48,10 +47,7 @@ Boruvka phase (five kernels, one tiny host sync per phase):
                       convention makes concurrent hooks structurally
                       incapable of forming parent cycles.
 
-Termination: zero crossing edges in phase 2's counter.  (A previous
-version stopped when no hook fired; that was WRONG -- a component that
-is the larger index of its pair never fired its own selection, so the
-forest silently missed heavy edges and finished under-merged.)
+Termination: zero crossing edges in phase 2's counter.
 """
 
 import time
@@ -59,6 +55,8 @@ import time
 import torch
 import triton
 import triton.language as tl
+
+from . import prof
 
 
 # --------------------------------------------------------------- kernels ---
@@ -234,11 +232,41 @@ def _score_kernel(pu_ptr, pv_ptr, W_ptr, g_ptr, E, BLOCK: tl.constexpr):
         tl.store(g_ptr + k * E + i, pv - pu - w, mask=m)
 
 
+
+def bonds_from_pairs(ij_geo, ij_geo_periodic, nx, ny, nz, device='cuda'):
+    """Winding constraints for the periodic pair lists.
+
+    Interior pairs (percolate.ij_pairs) are oriented i -> i + e_axis and
+    wrap pairs (percolate.periodic_ij_pairs) (n_axis - 1) -> 0; in the
+    lifted lattice both advance the axis index by +1, hence W = +e_axis
+    for both classes, recovered from the (signed) linear-index difference.
+    """
+    e_int = ij_geo.to(device=device, dtype=torch.int64)
+    e_per = ij_geo_periodic.to(device=device, dtype=torch.int64)
+    both = torch.cat([e_int, e_per], dim=0) if e_per.numel() else e_int
+    # The kernels take raw pointers, so require contiguous storage:
+    # plain [:, 0] views carry stride 2 and would be misread.
+    u, v = both[:, 0].contiguous(), both[:, 1].contiguous()
+    d = v - u
+    sx, sy, sz = ny * nz, nz, 1
+    W = torch.zeros(u.numel(), 3, device=device, dtype=torch.int32)
+    m0 = (d == sx) | (d == -(nx - 1) * sx)
+    m1 = (d == sy) | (d == -(ny - 1) * sy)
+    m2 = (d == sz) | (d == -(nz - 1) * sz)
+    W[m0, 0] = 1
+    W[m1, 1] = 1
+    W[m2, 2] = 1
+    if not bool((m0 | m1 | m2).all()):
+        raise RuntimeError(
+            'bonds_from_pairs: unexpected index difference (pairs must be '
+            '6-neighbour lattice bonds)')
+    return u, v, W
+
+
 # ---------------------------------------------------------------- driver ---
 def pld_winding_fast(radii, ij_geo, ij_geo_periodic, nx, ny, nz,
                      max_rounds=None, verbose=False):
-    """Same contract as uf_pld.pld_winding (pld_x/y/z, winding_x/y/z, ...)."""
-    from .uf_pld import bonds_from_pairs
+    """Return pld_x/pld_y/pld_z, winding_x/y/z and bookkeeping fields."""
 
     torch.cuda.synchronize()
     t0 = time.perf_counter()
@@ -350,8 +378,8 @@ def pld_winding_fast(radii, ij_geo, ij_geo_periodic, nx, ny, nz,
     result['rounds'] = rounds
     result['time_s'] = t_score - t0
     if verbose:
-        print(f'  triton: rounds={rounds} '
-              f'prep={1000*(t_prep-t0):.1f}ms '
-              f'boruvka={1000*(t_kruskal-t_prep):.1f}ms '
-              f'score={1000*(t_score-t_kruskal):.1f}ms')
+        prof.vprint(f'  triton: rounds={rounds} '
+                    f'prep={1000*(t_prep-t0):.1f}ms '
+                    f'boruvka={1000*(t_kruskal-t_prep):.1f}ms '
+                    f'score={1000*(t_score-t_kruskal):.1f}ms')
     return result

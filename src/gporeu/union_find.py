@@ -1,18 +1,17 @@
 """
-uf_graph.py -- GPU union-find primitives that replace the cugraph/cudf calls
-used by percolate.py and hmax_kernel.py:
+GPU union-find primitives for the lattice graph (Triton).
 
-    components(N, u, v)     -> int64 root per node (connected components)
-    max_st(N, u, v, w)      -> (src, dst, w_used) of a maximum spanning
-                               forest (one edge per non-root node link)
+    components(N, u, v) -> int64 root per node (connected components)
+    max_st(N, u, v, w)  -> (src, dst, w) links of a maximum spanning
+                           forest (one link per non-root node)
 
-Both use the branch-free fixed-hop find and the min->max CAS-linking
-invariant proven cycle-free in uf_pld_triton (see its header); with no
-per-slot weights, plain per-edge CAS on slot c = min(ru, rv) suffices for
-CC (the CAS winner makes guaranteed progress, losers are still crossing
-edges next round), while max_st reuses the deterministic ballot election.
-
-Termination for both is the exact predicate "zero crossing edges".
+Both use a branch-free fixed-hop find and the provably cycle-free
+min->max CAS linking invariant: for connected components, a plain
+per-edge CAS on slot c = min(ru, rv) suffices (the CAS winner makes
+guaranteed progress; losers remain crossing edges next round), while
+max_st adds a deterministic ballot election to pick one winning edge
+per component pair.  Termination for both is the exact predicate
+"zero crossing edges".
 """
 
 import torch
@@ -87,7 +86,12 @@ def _cc_final_kernel(par_ptr, root_ptr, N, maxh, ofl_ptr, BLOCK: tl.constexpr):
 def _split_kernel(par_ptr, N, BLOCK: tl.constexpr):
     """One path-splitting pass: par[i] <- par[par[i]].  Ancestor pointers
     stay valid ancestors so the forest is preserved, but tree depth is
-    halved, which keeps the branchless walks in merge/find cheap."""
+    halved, which keeps the branchless walks in merge/find cheap.
+
+    Connected components only: max_st recovers its spanning forest from
+    the parent array and therefore requires exact parents -- splitting
+    there would yield grandparent shortcut links, not graph edges.
+    """
     pid = tl.program_id(0)
     i = pid * BLOCK + tl.arange(0, BLOCK)
     m = i < N

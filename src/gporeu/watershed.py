@@ -1,3 +1,14 @@
+"""
+Safe-region + competitive watershed partitioning of the pore network.
+
+Each pore center keeps a safe core radius bounded by its clearance to
+every other center minus a wall-thickness buffer; voxels claimed by
+exactly one safe core are seeded, and the remaining void voxels are
+assigned by widest-path flooding (Triton sweeps along the six axis
+directions).  Pores that merge across periodic walls are detected and
+consolidated, and final centers are relabeled.
+"""
+
 import math
 import torch
 import triton
@@ -5,17 +16,20 @@ import triton.language as tl
 from . import prof
 
 def GPoreU_apply_pbc(pore_labels, merged_maxima_ids, grid_radaii, wall_thickness, grid_spacing):
-        '''CPU/NumPy port of the periodic-center merge.  Pure integer +
-    float32 index comparisons (every comparison is exact for the value
-    ranges involved: fractions >0.5 cannot change outcome between fp32
-    and fp64 for wall areas < 4e6 cells), so it is bit-identical to the
-        original GPU version while avoiding ~3 launches/sync per pair in
-        the sequential merge loop.  Returns device tensors as before. '''
+        """Merge pore labels/centers identified across periodic boundaries.
+
+        Wall contact counts drive a sequential merge on the CPU using pure
+        integer and float32 comparisons (exact for the value ranges
+        involved: threshold tests against 0.5 do not flip between fp32 and
+        fp64 for wall areas below 4e6 cells).  This avoids ~3 kernel
+        launches and synchronizations per candidate pair.  Results are
+        returned as device tensors.
+        """
 
         import numpy as np
         prof.mark('  pbc:enter')
 
-#general dimensions
+# General dimensions
         nx, ny, nz = pore_labels.shape
         device = pore_labels.device
 
@@ -25,11 +39,11 @@ def GPoreU_apply_pbc(pore_labels, merged_maxima_ids, grid_radaii, wall_thickness
                 raise ValueError('Wall thickness must select between 1 and the smallest grid dimension.')
 
         prof.mark('  pbc:prepared')
-#pull the (small) center bookkeeping to CPU
+# Pull the (small) center bookkeeping to CPU
         lab_np = pore_labels.detach().cpu().numpy()
         rad_np = grid_radaii.reshape(-1).detach().cpu().numpy()
 
-#get center labels, radii, and positions
+# Get center labels, radii, and positions
         center_labels = lab_np.reshape(-1)[merged_maxima_ids.detach().cpu().numpy().astype(np.int64)]
         center_radii = rad_np[merged_maxima_ids.detach().cpu().numpy().astype(np.int64)]
 
@@ -41,7 +55,7 @@ def GPoreU_apply_pbc(pore_labels, merged_maxima_ids, grid_radaii, wall_thickness
         center_positions = np.stack((center_x, center_y, center_z), axis=1)
 
 
-#sort labels and keep their corresponding data together
+# Sort labels and keep their corresponding data together
         center_order = np.argsort(center_labels, kind='stable')
 
         center_labels = center_labels[center_order]
@@ -53,7 +67,7 @@ def GPoreU_apply_pbc(pore_labels, merged_maxima_ids, grid_radaii, wall_thickness
 
 
         prof.mark('  pbc:cpu-copied')
-#check all three dimensions
+# Check all three dimensions
         for dimension in range(3):
 
                 if dimension == 0:
@@ -72,14 +86,14 @@ def GPoreU_apply_pbc(pore_labels, merged_maxima_ids, grid_radaii, wall_thickness
                         dimension_size = nz
 
 
-#count labels across the extracted layers
+# Count labels across the extracted layers
                 left_labels, left_counts = np.unique(left_wall, return_counts=True)
                 right_labels, right_counts = np.unique(right_wall, return_counts=True)
 
 
-#count corresponding label pairs (key-encoded 1D unique: np.unique on
-#row-views is the old hotspot; BIG exceeds any pore label so ordering by
-#key equals lexicographic ordering of (left, right) pairs exactly)
+# Count pairwise label co-occurrences across the pair.  Key-encoded 1D
+# uniques: BIG exceeds any pore label, so numeric key order equals
+# lexicographic order of the (left, right) label pairs exactly.
                 l_flat = left_wall.reshape(-1)
                 r_flat = right_wall.reshape(-1)
                 lmax = int(max(l_flat.max(initial=0), r_flat.max(initial=0))) + 1
@@ -93,7 +107,7 @@ def GPoreU_apply_pbc(pore_labels, merged_maxima_ids, grid_radaii, wall_thickness
                 pair_counts = pair_counts[valid]
 
 
-#get total wall counts for each label in each pair
+# Get total wall counts for each label in each pair
                 left_index = np.searchsorted(left_labels, unique_pairs[:, 0])
                 right_index = np.searchsorted(right_labels, unique_pairs[:, 1])
 
@@ -107,7 +121,7 @@ def GPoreU_apply_pbc(pore_labels, merged_maxima_ids, grid_radaii, wall_thickness
                 passed_pairs = unique_pairs[overlap_check]
 
 
-#get corresponding center radii and positions
+# Get corresponding center radii and positions
                 left_index = np.searchsorted(center_labels, passed_pairs[:, 0])
                 right_index = np.searchsorted(center_labels, passed_pairs[:, 1])
 
@@ -118,7 +132,7 @@ def GPoreU_apply_pbc(pore_labels, merged_maxima_ids, grid_radaii, wall_thickness
                 right_close = center_positions[right_index, dimension] >= dimension_size - wall_cells
 
 
-#merge the smaller pore only if its center is close
+# Merge the smaller pore only if its center is close
                 merge_left = left_close & (left_radius < right_radius)
                 merge_right = right_close & (right_radius < left_radius)
 
@@ -130,7 +144,7 @@ def GPoreU_apply_pbc(pore_labels, merged_maxima_ids, grid_radaii, wall_thickness
 
 
         prof.mark('  pbc:walls')
-#combine directed pairs from all dimensions
+# Combine directed pairs from all dimensions
         if all_merge_pairs:
                 periodic_pairs_np = np.concatenate(all_merge_pairs, axis=0)
         else:
@@ -143,7 +157,7 @@ def GPoreU_apply_pbc(pore_labels, merged_maxima_ids, grid_radaii, wall_thickness
                 periodic_pairs_np = np.stack((uk2 // b2, uk2 % b2), axis=1)
 
 
-#track the surviving original label for each pore
+# Track the surviving original label for each pore
         merged_labels = center_labels.copy()
 
         for row in range(periodic_pairs_np.shape[0]):
@@ -158,7 +172,7 @@ def GPoreU_apply_pbc(pore_labels, merged_maxima_ids, grid_radaii, wall_thickness
                 larger_label = merged_labels[larger_index]
 
 
-#compare surviving centers when earlier merges have joined groups
+# Compare surviving centers when earlier merges have joined groups
                 smaller_index = np.searchsorted(center_labels, smaller_label)
                 larger_index = np.searchsorted(center_labels, larger_label)
 
@@ -173,24 +187,24 @@ def GPoreU_apply_pbc(pore_labels, merged_maxima_ids, grid_radaii, wall_thickness
 
 
         prof.mark('  pbc:merge-loop')
-#keep one center per merged group
+# Keep one center per merged group
         surviving_labels = np.unique(merged_labels)
         keep_centers = np.isin(center_labels, surviving_labels)
 
         merged_maxima_np = merged_maxima_np[keep_centers]
 
 
-#number the final pores from 1 onward
+# Number the final pores from 1 onward
         final_labels = np.searchsorted(surviving_labels, merged_labels)
         final_labels = final_labels + 1
 
 
-#map original labels to final labels, with background remaining zero
+# Map original labels to final labels, with background remaining zero
         periodic_label_map_np = np.zeros(int(center_labels.max()) + 1, dtype=np.int64)
         periodic_label_map_np[center_labels] = final_labels
 
 
-#update voxel labels
+# Update voxel labels
         pore_labels_np = periodic_label_map_np[lab_np]
 
         prof.mark('  pbc:renumbered')
@@ -205,29 +219,32 @@ def GPoreU_apply_pbc(pore_labels, merged_maxima_ids, grid_radaii, wall_thickness
 @triton.jit
 def GPoreU_SafeRegion_Kernel(grid, merged_maxima_ids, safe_radaii, geo_grid_occ, pore_labels, safe_mask, NGRID, num_pores, BLOCKSIZE: tl.constexpr):
 
-#identify voxels in this block
+        """Kernel: assign voxels claimed by exactly one safe center
+        sphere.
+        """
+        # Identify the voxels in this block.
         pid = tl.program_id(0)
         offsets = pid * BLOCKSIZE + tl.arange(0, BLOCKSIZE)
         valid = offsets < NGRID
 
 
-#load voxel coordinates
+# Load voxel coordinates
         x = tl.load(grid + offsets * 3, mask=valid, other=0).to(tl.float32)
         y = tl.load(grid + offsets * 3 + 1, mask=valid, other=0).to(tl.float32)
         z = tl.load(grid + offsets * 3 + 2, mask=valid, other=0).to(tl.float32)
 
 
-#check whether voxels are void
+# Check whether voxels are void
         occupied = tl.load(geo_grid_occ + offsets, mask=valid, other=1)
         void = valid & (occupied == 0)
 
 
-#start with no claims or labels
+# Start with no claims or labels
         claim_counts = tl.full((BLOCKSIZE,), 0, tl.int32)
         labels = tl.full((BLOCKSIZE,), 0, tl.int32)
 
 
-#check each pore's safe sphere
+# Check each pore's safe sphere
         for pore in range(num_pores):
 
                 center_id = tl.load(merged_maxima_ids + pore)
@@ -249,7 +266,7 @@ def GPoreU_SafeRegion_Kernel(grid, merged_maxima_ids, safe_radaii, geo_grid_occ,
                 labels = tl.where(inside, pore + 1, labels)
 
 
-#assign only voxels claimed by exactly one pore
+# Assign only voxels claimed by exactly one pore
         safe = void & (claim_counts == 1)
         labels = tl.where(safe, labels, 0)
 
@@ -260,16 +277,15 @@ def GPoreU_SafeRegion_Kernel(grid, merged_maxima_ids, safe_radaii, geo_grid_occ,
 def GPoreU_Flood_Sweep_Kernel(
         cap_src, lbl_src, cap_dst, lbl_dst, rad_ptr, comp_ptr, flag_ptr,
         nx, ny, nz, NGRID, BLOCKSIZE: tl.constexpr):
-    '''One synchronous competitive-flooding sweep over the whole grid.
+    """One synchronous competitive-flooding sweep over the whole grid.
 
-    Exact replica of the reference torch loop: six directed neighborhoods
-    in order (x+, x-, y+, y-, z+, z-); proposals only accepted by
-    competitive voxels with a labeled neighbor; higher capacity wins,
-    ties prefer a smaller (zero-favoring) label; out-of-bounds neighbor
-    capacity is -inf.  Reads only from the *_src arrays (double buffered)
-    so every vote sees the previous sweep.  Sets *flag_ptr if anything
-    changed.
-    '''
+    Six directed neighborhoods are voted in order (x+, x-, y+, y-, z+,
+    z-); proposals are accepted only for competitive voxels with a
+    labeled neighbor; higher capacity wins, ties prefer a smaller
+    (zero-favoring) label; out-of-bounds neighbor capacity is -inf.
+    Reads only from the *_src arrays (double buffered) so every vote
+    sees the previous sweep.  Sets *flag_ptr if anything changed.
+    """
     pid = tl.program_id(0)
     v = pid * BLOCKSIZE + tl.arange(0, BLOCKSIZE)
     m = v < NGRID
@@ -331,7 +347,13 @@ def GPoreU_Flood_Sweep_Kernel(
 
 def GPoreU_safe_watershed(_input, merged_maxima_ids, wall_thickness, grid_spacing, safe_buffer=6.0):
 
-#get inputs
+        """Partition the void voxels into pore basins.
+
+        Safe-region assignment, iterative competitive flooding (Triton
+        sweeps along the six axis directions), then merger of periodic
+        pores.  Updates and returns the input dict (``pore_labels``,
+        ``num_pores``, center bookkeeping, iteration counts).
+        """
         grid = _input['grid'].contiguous()
         grid_radaii = _input['grid_radaii'].reshape(-1).contiguous()
         geo_grid_occ = _input['geo_grid_occ'].reshape(-1).bool().contiguous()
@@ -349,7 +371,7 @@ def GPoreU_safe_watershed(_input, merged_maxima_ids, wall_thickness, grid_spacin
                 raise ValueError('Safe buffer cannot be negative.')
 
 
-#calculate distances between centers
+# Calculate distances between centers
         clusters_cart_positions = grid[merged_maxima_ids].float()
         clusters_radaii = grid_radaii[merged_maxima_ids].float()
 
@@ -358,7 +380,7 @@ def GPoreU_safe_watershed(_input, merged_maxima_ids, wall_thickness, grid_spacin
         separation_distances.fill_diagonal_(float('inf'))
 
 
-#calculate safe radii
+# Calculate safe radii
         clearance = separation_distances - clusters_radaii[None, :]
         clearance = clearance.amin(dim=1)
 
@@ -367,27 +389,27 @@ def GPoreU_safe_watershed(_input, merged_maxima_ids, wall_thickness, grid_spacin
         safe_radaii = safe_radaii.clamp_min(0).contiguous()
 
 
-#prepare outputs
+# Prepare outputs
         pore_labels = torch.zeros(NGRID, device=device, dtype=torch.long)
         safe_mask = torch.zeros(NGRID, device=device, dtype=torch.bool)
 
 
-#assign safe regions
+# Assign safe regions
         BLOCKSIZE = 128
         safe_grid = (triton.cdiv(NGRID, BLOCKSIZE),)
 
         GPoreU_SafeRegion_Kernel[safe_grid](grid, merged_maxima_ids, safe_radaii, geo_grid_occ, pore_labels, safe_mask, NGRID, num_pores, BLOCKSIZE=BLOCKSIZE)
 
 
-#retain center markers even when their safe radius is zero
+# Retain center markers even when their safe radius is zero
         pore_labels[merged_maxima_ids] = torch.arange(1, num_pores + 1, device=device)
         safe_mask[merged_maxima_ids] = True
 
 
-#remaining void voxels go to flooding
+# Remaining void voxels go to flooding
         competitive_mask = ~geo_grid_occ & ~safe_mask
 
-#reshape grids
+# Reshape grids
         nx = int(_input['nx'])
         ny = int(_input['ny'])
         nz = int(_input['nz'])
@@ -398,7 +420,7 @@ def GPoreU_safe_watershed(_input, merged_maxima_ids, wall_thickness, grid_spacin
         grid_radaii = grid_radaii.reshape(nx, ny, nz)
 
 
-#start path capacities at the safe voxels
+# Start path capacities at the safe voxels
         capacity = torch.full((nx, ny, nz), -float('inf'), device=device, dtype=torch.float32)
         capacity[safe_mask] = grid_radaii[safe_mask].float()
 
@@ -420,7 +442,7 @@ def GPoreU_safe_watershed(_input, merged_maxima_ids, wall_thickness, grid_spacin
 
         flood_iterations = 0
 
-        #repeat until capacities and labels stop changing
+        # Repeat until capacities and labels stop changing
         while True:
 
                 flag.zero_()
@@ -433,7 +455,7 @@ def GPoreU_safe_watershed(_input, merged_maxima_ids, wall_thickness, grid_spacin
 
                 flood_iterations += 1
 
-                #stop only when neither capacities nor labels change
+                # Stop only when neither capacities nor labels change
                 if int(flag[0]) == 0:
                         break
 
@@ -442,26 +464,26 @@ def GPoreU_safe_watershed(_input, merged_maxima_ids, wall_thickness, grid_spacin
         capacity = cap_a
 
 
-#report results
+# Report results
         void_mask = ~geo_grid_occ.reshape(nx, ny, nz)
         unassigned = void_mask & (pore_labels == 0)
 
         prof.vprint('Competitive flooding iterations:', flood_iterations, flush=True)
         prof.vprint('Unassigned void points:', int(unassigned.sum().item()), flush=True)
 
-#save results before periodic merging
+# Save results before periodic merging
         pore_labels_before_pbc = pore_labels.clone()
         centers_before_pbc = merged_maxima_ids.clone()
 
 
-#merge pores across periodic walls
+# Merge pores across periodic walls
         pore_labels, merged_maxima_ids, periodic_label_map, periodic_pairs = GPoreU_apply_pbc(pore_labels, merged_maxima_ids, grid_radaii, wall_thickness, grid_spacing)
 
         prof.mark('ws:apply-pbc')
         num_pores = merged_maxima_ids.numel()
 
 
-#pack results
+# Pack results
         _input['pore_labels'] = pore_labels.reshape(-1)
         _input['merged_maxima_ids'] = merged_maxima_ids
         _input['markers'] = merged_maxima_ids

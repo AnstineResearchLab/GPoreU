@@ -1,3 +1,15 @@
+"""
+CH4 probe interaction-energy and gradient grids, plus the 2D
+(energy, |gradient|) histogram.
+
+Every grid point is accumulated over all framework atoms and all
+periodic images within the cutoff sphere (exact image enumeration, as
+required for cells narrower than 2 * rcut).  Mixing is
+Lorentz-Berthelot; energy and force are truncated and shifted at rcut.
+Kernel units are Kelvin and K/Angstrom (temperature units); the public
+wrapper converts to kJ/mol.
+"""
+
 import math
 
 import torch
@@ -27,6 +39,15 @@ def energy_gradient_kernel(
     BLOCK_GRID: tl.constexpr,
     BLOCK_ATOMS: tl.constexpr
 ):
+
+    """Lennard-Jones energy and gradient fields for the probe grid.
+        Each program accumulates the contributions of a chunk of grid points
+        against one block of atoms, evaluated over all periodic images of
+        each atom within the cutoff sphere (exact image enumeration via the
+        kernel KX/KY/KZ ranges).  The LJ pair form is truncated and shifted
+        at rcut with an impulse correction on the force branch.
+    """
+
 
     # Load grid points
     grid_off = tl.program_id(0) * BLOCK_GRID + tl.arange(0, BLOCK_GRID)
@@ -343,6 +364,12 @@ def histogram_2d_kernel(
     BLOCK_SIZE: tl.constexpr
 ):
 
+    """Bin grid points into a 14 energy x 5 |gradient| histogram.
+        Flat counts are accumulated atomically; bin edges are the fixed
+        constants of the reference 2D histogram definition.
+    """
+
+
     offsets = (
         tl.program_id(0) * BLOCK_SIZE
         + tl.arange(0, BLOCK_SIZE)
@@ -447,6 +474,14 @@ def calculate_energy_gradient(
     images=True
 ):
 
+    """Evaluate probe energy and gradient magnitude on all grid points.
+
+        Returns (energies, gradients) in kernel units (K, K/Angstrom).
+        ``images`` selects exact periodic-image enumeration, which is
+        required whenever any cell width is below 2 * (rcut + delta).
+    """
+
+
     inv_cell = torch.linalg.inv(cell).contiguous()
 
     # Periodic images needed for an exact truncated lattice sum at this
@@ -522,6 +557,11 @@ def build_2d_energy_histogram(
     gradients
 ):
 
+    """2D (energy, |gradient|) histogram; returns raw counts and counts
+        normalized by the number of grid points (5 rows x 14 columns).
+    """
+
+
     ngrid = energies.numel()
 
 
@@ -570,6 +610,18 @@ def build_2d_energy_histogram(
 
 
 def GPoreU_energy(data, rcut=12.0, delta=0.005, images=True, histogram=True):
+
+    """CH4 interaction-energy stage.
+
+        Computes the probe energy and gradient fields over the full
+        framework grid (converted to kJ/mol), and optionally the 2D
+        (energy, |gradient|) histogram.  Returns a dict with ``energies``,
+        ``gradients`` and, when requested, ``energy_histogram`` and
+        ``energy_histogram_normalized``.
+
+        ``images`` must remain True for cells narrower than 2 * rcut.
+    """
+
 
     # Use all grid points
     grid = data['grid']

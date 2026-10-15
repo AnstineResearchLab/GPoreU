@@ -1,10 +1,29 @@
+"""
+Connectivity and accessibility.
+
+Builds periodic nearest-neighbour bond lists (interior and wrapping face
+pairs), clusters accessible lattice points (Triton union-find), decides
+per-direction percolation from labels shared between opposite faces, and
+computes the helium-accessible and geometric pore volumes.
+"""
+
 import torch
 
-from .uf_graph import components
+from .union_find import components
 
 def GPoreU_percolate(_input):
 
-    ''' ------------- UNPACK DICT TO TENSORS ------------------ '''
+    """Connectivity stage.
+
+        Builds the interior and periodic neighbour pair lists, clusters the
+        accessible points (Triton union-find), decides per-direction
+        percolation for the He, N2 and geometric masks, and computes the
+        helium-accessible and geometric pore volumes.  Returns a dict of the
+        pair lists, cluster labels, percolation flags and volumes.
+    """
+
+
+    # Unpack the pipeline dict.
     nx           =           _input['nx']
     ny           =           _input['ny']
     nz           =           _input['nz']
@@ -14,33 +33,33 @@ def GPoreU_percolate(_input):
     he_lj_energy = _input['he_lj_energy']
     volume       =       _input['volume']
 
-    ''' ------------ ASSERTS TO VERIFY ALL CUDA --------------- '''
+    # Require CUDA tensors.
     assert geo_grid_occ.is_cuda
     assert   n_grid_occ.is_cuda
     assert  he_grid_occ.is_cuda
     assert  he_lj_energy.is_cuda
 
-    ''' --------- CALCULATE ALL IJ NEIGHBORS GRIDS ------------ '''
+    # Nearest-neighbour bond lists (interior + periodic).
     ij_geo = ij_pairs(geo_grid_occ)
     ij_he  =  ij_pairs(he_grid_occ)
     ij_n   =   ij_pairs(n_grid_occ)
     ij_geo_periodic = periodic_ij_pairs(geo_grid_occ)
-    ''' ------- CALCULATE ALL CLUSTERS FROM IJ NEIGHS --------- '''
+    # Connected components over the accessible lattice.
     geo_clusters, geo_perc_x, geo_perc_y, geo_perc_z =  get_clusters(ij_geo, nx, ny, nz)
     he_clusters,  he_perc_x,  he_perc_y,  he_perc_z  =  get_clusters(ij_he,  nx, ny, nz)
     n_clusters,   n_perc_x,   n_perc_y,    n_perc_z  =  get_clusters(ij_n,   nx, ny, nz)
 
-    ''' ----------  HELIUM PORE VOLUME ------------------------ '''
+    # Helium-accessible pore volume.
     if he_perc_x or he_perc_y or he_perc_z:
            access_he_pore_volume= he_pore_volume(he_lj_energy, he_clusters, volume)
     else:
            access_he_pore_volume=0.0
-    ''' ----------  GEOMETRIC  PORE VOLUME ------------------------ '''
+    # Geometric pore volume.
     if geo_perc_x or geo_perc_y or geo_perc_z:
           access_geo_pore_volume=geo_volume(geo_clusters, volume)
     else:
          access_geo_pore_volume=0.0
-    ''' ------------- PACK OUTPUT TO DICT --------------- '''
+    # Collect results.
     _out = dict(ij_geo                =                ij_geo,
                 ij_geo_periodic       =       ij_geo_periodic,
                 geo_access            =          geo_clusters,
@@ -61,31 +80,35 @@ def GPoreU_percolate(_input):
 
 def ij_pairs(O: torch.Tensor):
 
-    ''' ----------- STRIDES FOR LINEAR INDEX CALC ------------- '''
+    """Adjacent (linear-index) pairs along +x, +y, +z of mask O.
+    """
+
+
+    # Strides for the linear (x-major) index.
     x_stride, y_stride, z_stride = O.stride()
 
-    ''' ----------- LOOK TO THE RIGHT ------------- '''
+    # Neighbours in +x.
     O_rolled = O.roll(-1,0)
     O_combined = ((O==False) & (O_rolled==False))
     _ids = torch.argwhere(O_combined[:-1,:,:])
     _ix = _ids[:,0] * x_stride + _ids[:,1] * y_stride + _ids[:,2] * z_stride
     _jx = (_ids[:,0]+1) * x_stride + _ids[:,1] * y_stride + _ids[:,2] * z_stride
 
-    ''' ----------- LOOK IN FRONT OF -------------- '''
+    # Neighbours in +y.
     O_rolled = O.roll(-1,1)
     O_combined = ((O==False) & (O_rolled==False))
     _ids = torch.argwhere(O_combined[:,:-1,:])
     _iy = _ids[:,0] * x_stride + _ids[:,1] * y_stride + _ids[:,2] * z_stride
     _jy = (_ids[:,0]) * x_stride + (_ids[:,1]+1) * y_stride + _ids[:,2] * z_stride
 
-    ''' -------------- LOOK ABOVE ----------------- '''
+    # Neighbours in +z.
     O_rolled = O.roll(-1,2)
     O_combined = ((O==False) & (O_rolled==False))
     _ids = torch.argwhere(O_combined[:,:,:-1])
     _iz = _ids[:,0] * x_stride + _ids[:,1] * y_stride + _ids[:,2] * z_stride
     _jz = _ids[:,0] * x_stride + _ids[:,1] * y_stride + (_ids[:,2]+1) * z_stride
 
-    ''' ---------- FORMAT ALL IJ PAIRS ------------ '''
+    # Stack into (i, j) pair arrays.
     _i = torch.concatenate([_ix,_iy,_iz])
     _j = torch.concatenate([_jx,_jy,_jz])
     pairs = torch.concatenate([_i.view(-1,1),_j.view(-1,1)], -1).to(torch.int32)
@@ -94,16 +117,20 @@ def ij_pairs(O: torch.Tensor):
 
 def periodic_ij_pairs(O: torch.Tensor):
 
-    ''' ----------- STRIDES FOR LINEAR INDEX CALC ------------- '''
+    """Wrap pairs joining opposite faces of mask O along each axis.
+    """
+
+
+    # Strides for the linear (x-major) index.
     x_stride, y_stride, z_stride = O.stride()
 
-    ''' ----------- X-EDGE CHECK ------------- '''
+    # Wrap pairs across the x faces.
     x_check = ((O[-1,:,:]==False) & (O[0,:,:]==False))
     _ids = torch.argwhere(x_check)
     _ix = (O.shape[0]-1) * x_stride + _ids[:,0] * y_stride + _ids[:,1] * z_stride
     _jx =  _ids[:,0] * y_stride + _ids[:,1] * z_stride
 
-    ''' ----------- Y-EDGE CHECK ----------------------- '''
+    # Wrap pairs across the y faces.
     y_check = ((O[:,-1,:]==False) & (O[:,0,:]==False))
     _ids = torch.argwhere(y_check)
 
@@ -111,7 +138,7 @@ def periodic_ij_pairs(O: torch.Tensor):
     _jy = _ids[:,0] * x_stride + _ids[:,1] * z_stride
 
 
-    ''' ----------- Z-EDGE CHECK ----------------------- '''
+    # Wrap pairs across the z faces.
     z_check = ((O[:,:,-1]==False) & (O[:,:,0]==False))
     _ids = torch.argwhere(z_check)
 
@@ -119,7 +146,7 @@ def periodic_ij_pairs(O: torch.Tensor):
     _jz = _ids[:,0] * x_stride + _ids[:,1] * y_stride
 
 
-    ''' ---------- FORMAT PERIODIC IJ PAIRS ------------------- '''
+    # Stack the periodic pair arrays.
     _i = torch.concatenate([_ix,_iy,_iz])
     _j = torch.concatenate([_jx,_jy,_jz])
 
@@ -132,15 +159,19 @@ def get_clusters(ij_pairs: torch.Tensor,
                  ny: int,
                  nz: int):
 
+    """Cluster labels for all lattice points via Triton union-find;
+        points in no edge carry the -1 sentinel (see face-percolation test).
+    """
 
-    ''' ---------- LABEL CLUSTERS WITH Triton UNION-FIND ------- '''
-    # connected-component roots; cluster ids are only ever compared for
+
+
+    # Label clusters (Triton union-find).
+    # Connected-component roots; cluster ids are only ever compared for
     # equality below.  Nodes that appear in NO edge (occupied, or isolated
-    # accessible points) must carry the -1 sentinel: the face-percolation
-    # test counts unique labels shared between opposite faces and declares
-    # percolation only when that set has MORE THAN ONE member, which relies
-    # on -1 (both faces) occupying the set.  This reproduces the old cugraph
-    # convention bit-for-bit.
+    # accessible points) carry the -1 sentinel: the face-percolation test
+    # counts unique labels shared between opposite faces and declares
+    # percolation only when that set has MORE THAN ONE member, which
+    # relies on -1 (present on both faces) occupying the set.
     N = nx * ny * nz
     roots = components(N, ij_pairs[:, 0], ij_pairs[:, 1])
     in_edges = torch.zeros(N, dtype=torch.bool, device=ij_pairs.device)
@@ -151,8 +182,8 @@ def get_clusters(ij_pairs: torch.Tensor,
         in_edges, roots, torch.full_like(roots, -1)
     ).view(nx, ny, nz)
 
-    ''' ----- CHECK PERCOLATION WITH TORCH UNIQUE ------ '''
-    ''' X '''
+    # Percolation test: labels shared between opposite faces.
+    # X axis
     lower_face = (clusters[0,:,:]).view(-1)
     upper_face = (clusters[-1,:,:]).view(-1)
     percolated_x_clusters = torch.unique(lower_face[torch.isin(lower_face, upper_face)])
@@ -161,7 +192,7 @@ def get_clusters(ij_pairs: torch.Tensor,
     else:
         perc_in_x = False
 
-    ''' Y '''
+    # Y axis
     lower_face = (clusters[:,0,:]).reshape(-1)
     upper_face = (clusters[:,-1,:]).reshape(-1)
     percolated_y_clusters = torch.unique(lower_face[torch.isin(lower_face, upper_face)])
@@ -170,7 +201,7 @@ def get_clusters(ij_pairs: torch.Tensor,
     else:
         perc_in_y = False
 
-    ''' Z '''
+    # Z axis
     lower_face = (clusters[:,:,0]).view(-1)
     upper_face = (clusters[:,:,-1]).view(-1)
     percolated_z_clusters = torch.unique(lower_face[torch.isin(lower_face, upper_face)])
@@ -180,7 +211,7 @@ def get_clusters(ij_pairs: torch.Tensor,
         perc_in_z = False
 
 
-    ''' --- DEFINE ACCESSIBLE / INACCESIBLE GRID ---- '''
+    # Accessible / inaccessible masks.
     percolated_clusters = torch.unique(
                                         torch.concatenate([percolated_x_clusters,
                                                            percolated_y_clusters,
@@ -199,7 +230,7 @@ def get_clusters(ij_pairs: torch.Tensor,
     #define 0 to be "is not percolated"
     clusters[~mask] = 0
 
-    # convert to boolean, for ~4x better memory
+    # Boolean masks (~4x less memory than int64 labels).
     clusters = clusters.to(torch.bool)
 
   
@@ -210,6 +241,11 @@ def he_pore_volume(
     he_access: torch.Tensor,
     volume
 ):
+
+    """Helium-accessible pore volume from the soft Boltzmann
+        accessibility field.
+    """
+
     NGRID = he_access.numel()
     
     access_he_pore_volume = (
@@ -220,6 +256,10 @@ def he_pore_volume(
 
     return access_he_pore_volume
 def geo_volume(geo_access, volume):
+
+    """Geometric pore volume from the count of accessible voxels.
+    """
+
     NGRID=geo_access.numel()
     nz_geo_access=geo_access[geo_access>0]
     nz_geo_access_gridpoints=nz_geo_access.numel()
