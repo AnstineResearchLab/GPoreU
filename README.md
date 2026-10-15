@@ -110,12 +110,15 @@ print(format_summary(data, Path('IRMOF1.cif'), DEFAULT_CONFIG,
 ```
 
 `data` is the pipeline dict (all intermediate grids and results).  The
-modules are deliberately self-explanatory: `grid` (voxelization),
+package is grouped by function: stage modules `grid` (voxelization),
 `percolate` (connectivity, percolation, volumes), `psd_ffv` (pore size
-distribution / free volume), `surface_area`, `pore_network` +
-`watershed` (pore network), `pld` + `winding_pld` + `union_find`
-(PLD/LCD), `energy` (CH4 grids and 2D histogram), `util` (CIF input and
-grid preparation), `force_fields`, and `prof` (opt-in diagnostics).
+distribution / free volume), `surface_area`, `pore_graph` (pore network:
+H-maxima, safe regions, watershed flooding), `pld` (PLD/LCD, including
+the winding union-find engine) and `energy` (CH4 grids and 2D
+histogram), plus `utils/` for code shared across stages: CIF and grid
+preparation (`structure`), force-field tables (`force_fields`), Triton
+union-find / maximum-spanning-forest primitives (`union_find`) and
+opt-in diagnostics (`prof`).
 
 ## Reproducibility & diagnostics
 

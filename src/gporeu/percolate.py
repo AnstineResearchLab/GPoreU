@@ -9,7 +9,7 @@ computes the helium-accessible and geometric pore volumes.
 
 import torch
 
-from .union_find import components
+from .utils.union_find import components
 
 def GPoreU_percolate(_input):
 

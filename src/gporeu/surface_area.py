@@ -16,7 +16,7 @@ import torch
 import triton
 import triton.language as tl
 
-from . import prof
+from .utils import prof
 
 SAMPLES_PER_ATOM = 512
 

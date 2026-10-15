@@ -81,7 +81,7 @@ def _step_surface_area(data, cfg):
 
 
 def _step_network(data, cfg):
-    from .pore_network import GPoreU_poreGraph
+    from .pore_graph import GPoreU_poreGraph
     out = GPoreU_poreGraph(data, safe_buffer=cfg['pore_network']['safe_buffer'])
     if out is not None and out is not data:
         data.update(out)
@@ -283,7 +283,7 @@ def run_one(cif_path, cfg, verbose=False):
     """
 
     import torch
-    from . import util
+    from .utils import structure as util
     torch.manual_seed(cfg['seed'])
 
     t0 = time.perf_counter()
