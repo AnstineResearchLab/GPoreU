@@ -131,15 +131,6 @@ Stochastic stages (PSD sampling, surface-area Monte-Carlo) are seeded per
 structure (`seed`, default 0). `GPOREU_VERBOSE=1` re-enables stage
 diagnostics; `GPOREU_PROFILE=1` prints pore-graph section timings.
 
-## Verification
-
-This implementation was verified against PoreBlazer logs, an external 2D
-energy-histogram reference, and PoroNet structural outputs (PLD agreement
-<= 0.07 A vs PoreBlazer on the validated set; pointwise CH4 energies to
-~1e-5 relative; acceptance suites green, including bit-identical kernel-
-optimization gates). The full verification harness lives in the
-development tree (`verification/`, REPORT_A_B.md, TOLERANCES.md).
-
 ## Tests
 
 ```bash

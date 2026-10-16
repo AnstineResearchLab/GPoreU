@@ -1,18 +1,16 @@
 #!/usr/bin/env python
-"""Process a single CIF through the Python interface.
+"""Process a single CIF through the GPoreU Python interface.
 
-Runs the full auto-resolved characterization pipeline on one structure
-and prints the same report the CLI writes to NAME.summary, then shows
-how to reach into the pipeline dict for raw numbers and per-step
-timings/reasons.
+Runs the full auto-resolved characterization pipeline on one structure,
+prints the report that the CLI would write to NAME.summary, then shows
+the raw numbers, the execution plan and per-step timings.
 
 Usage:
-    python 01_process_single_cif.py [structure.cif]
+    python process_single_cif.py [structure.cif]
 
-Without an argument, uses WEI.cif from $GPOREU_TEST_CIF_DIR (or ./cif_files).
+Without an argument, uses cifs/IRMOF1.cif shipped next to this script.
 """
 
-import os
 import sys
 from pathlib import Path
 
@@ -20,14 +18,11 @@ from gporeu.cli import DEFAULT_CONFIG, format_summary, run_one
 
 
 def main():
-    if len(sys.argv) > 1:
-        cif = Path(sys.argv[1])
-    else:
-        root = Path(os.environ.get('GPOREU_TEST_CIF_DIR', './cif_files'))
-        cif = root / 'WEI.cif'
+    here = Path(__file__).resolve().parent
+    cif = Path(sys.argv[1]) if len(sys.argv) > 1 else here / 'cifs' / 'IRMOF1.cif'
 
-    # run_one() resolves the method list into pipeline steps, executes
-    # them in dependency order and returns:
+    # run_one() resolves the requested methods into pipeline steps,
+    # executes them in dependency order on the GPU, and returns:
     #   data    -- the pipeline dict (grids + every stage result)
     #   steps   -- actual execution order
     #   why     -- why each step ran (requested / pulled in by which one)

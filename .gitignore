@@ -8,3 +8,5 @@ gporeu_results/
 *.summary
 *.grid
 *.pt
+examples/**/out*/
+examples/**/py_batch/

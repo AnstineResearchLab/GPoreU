@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# One CIF through the command-line interface, full characterization.
+# One CIF through the GPoreU command-line interface: full characterization.
 #
 # Writes out_single/NAME.summary (identical text to what is printed).
 #
-# Usage:  ./03_cli_single_file.sh [structure.cif]
+# Usage:  ./run_single.sh [structure.cif]
 set -euo pipefail
 
-CIF="${1:-${GPOREU_TEST_CIF_DIR:-./cif_files}/IRMOF1.cif}"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+CIF="${1:-$HERE/cifs/IRMOF1.cif}"
 
 gporeu "$CIF" -o out_single
 
