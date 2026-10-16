@@ -125,6 +125,27 @@ preparation (`structure`), force-field tables (`force_fields`), Triton
 union-find / maximum-spanning-forest primitives (`union_find`) and
 opt-in diagnostics (`prof`).
 
+## Method documentation
+
+Detailed explainer documents - the scientific theory behind each
+output, the exact routines and constants GPoreU uses, design
+justifications, and the ordered function calls of each method - are in
+[`docs/`](docs/index.md):
+
+| method | doc |
+|---|---|
+| foundations (voxel grid, probe fields) | [docs/voxelization.md](docs/voxelization.md) |
+| `porosity` | [docs/porosity.md](docs/porosity.md) |
+| `percolation` | [docs/percolation.md](docs/percolation.md) |
+| `ffv` | [docs/ffv.md](docs/ffv.md) |
+| `pore_size_distribution` | [docs/pore_size_distribution.md](docs/pore_size_distribution.md) |
+| `surface_area` | [docs/surface_area.md](docs/surface_area.md) |
+| `pore_network` | [docs/pore_network.md](docs/pore_network.md) |
+| `pld` | [docs/pld.md](docs/pld.md) |
+| `lcd` | [docs/lcd.md](docs/lcd.md) |
+| `energy_grid` | [docs/energy_grid.md](docs/energy_grid.md) |
+| `energy_histogram` | [docs/energy_histogram.md](docs/energy_histogram.md) |
+
 ## Reproducibility & diagnostics
 
 Stochastic stages (PSD sampling, surface-area Monte-Carlo) are seeded per
