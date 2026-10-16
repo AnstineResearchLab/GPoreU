@@ -138,3 +138,7 @@ pytest tests/                      # plan/logic tests always run;
                                    # end-to-end GPU test needs CIFs:
 GPOREU_TEST_CIF_DIR=/path/to/cifs pytest tests/test_end_to_end.py
 ```
+
+## License
+
+Distributed under the terms of the [MIT License](LICENSE).
