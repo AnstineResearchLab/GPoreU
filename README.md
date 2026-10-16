@@ -43,6 +43,7 @@ gporeu structure.cif                        # one structure
 gporeu ./cifs/ -o results/                  # whole directory (batch)
 gporeu ./cifs/ -m pld,porosity              # subset of methods
 gporeu ./cifs/ -c settings.json --save-grids
+gporeu MOF.cif -m energy --save-xyz       # energy/|grad| grid as .energy.xyz
 gporeu --list-methods                       # methods + dependency graph
 gporeu cif_files/IRMOF1.cif -m ehist --explain   # show resolved plan only
 gporeu --init-config my_settings.json       # documented settings template
@@ -57,6 +58,7 @@ Outputs per structure `NAME.cif` (in the output directory):
 |---|---|
 | `NAME.summary` | formatted characterization report (also printed) |
 | `NAME.grid`    | grid property arrays -- **only** with `--save-grids` (npz default, `--grid-format pt`, `compress` in settings) |
+| `NAME.energy.xyz` | CH4 interaction energy and \|gradient\| per grid point as extended XYZ (`X x y z E \|grad\|`, kJ/mol) -- **only** with `--save-xyz`, requires the `energy_grid` method |
 
 Grid arrays include: grid points, geo/He/N2 occupancies and access masks,
 free-radius field, probe LJ energies, pore labels, pore-out field, CH4

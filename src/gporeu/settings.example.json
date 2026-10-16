@@ -29,9 +29,12 @@
 
   "output": {
     "save_grids": false,
+    "save_xyz": false,
+    "_output": "save_grids -> NAME.grid (npz/pt arrays); save_xyz -> NAME.energy.xyz (per-point CH4 energy and |gradient|, extended XYZ; needs the energy_grid method).",
     "grid_format": "npz",
     "compress": false,
     "summary_suffix": ".summary",
-    "grid_suffix": ".grid"
+    "grid_suffix": ".grid",
+    "xyz_suffix": ".energy.xyz"
   }
 }

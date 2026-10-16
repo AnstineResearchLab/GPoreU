@@ -61,3 +61,26 @@ selected methods produced:
 ```
 
 From Python the same dump is `gporeu.cli.save_grid(data, path, cfg)`.
+
+## Energy / gradient grid as XYZ (`--save-xyz`)
+
+The CH4 energy and gradient fields can also be written as an extended
+XYZ point set -- one line per grid point -- for direct visualization:
+
+```bash
+gporeu cifs/WEI.cif -m energy --save-xyz -o out_grids
+```
+
+`NAME.energy.xyz`:
+
+```
+18750
+GPoreU CH4 energy grid: 18750 points; columns: energy_kJ_mol grad_energy_kJ_mol_A
+X 0.0000 0.0000 0.0000 1595.45 7492.08
+...
+```
+
+The dummy element `X` marks non-atomic sample points, and the two
+trailing columns (`energy_kJ_mol`, `|grad energy|`) are read as the
+occupancy / beta-factor by VMD (color by beta to paint the energy
+landscape) and as named columns by OVITO's extended-XYZ reader.

@@ -10,3 +10,4 @@ gporeu_results/
 *.pt
 examples/**/out*/
 examples/**/py_batch/
+*.xyz

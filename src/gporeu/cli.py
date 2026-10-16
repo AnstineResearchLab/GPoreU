@@ -16,6 +16,8 @@ values a method needs are produced before it runs.  Requesting e.g.
 Outputs per structure ``NAME``:
     NAME.summary   formatted characterization summary (always)
     NAME.grid      grid property dump (npz or pt, only with --save-grids)
+    NAME.energy.xyz  CH4 energy / |gradient| grid as extended XYZ
+                   (only with --save-xyz)
 """
 
 import argparse
@@ -231,6 +233,7 @@ DEFAULT_CONFIG = {
     'pore_network': {'wall_thickness': 1.0, 'safe_buffer': 6.0},
     'energy': {'rcut': 12.0, 'delta': 0.005, 'images': True},
     'output': {'save_grids': False, 'grid_format': 'npz',
+               'save_xyz': False, 'xyz_suffix': '.energy.xyz',
                'compress': False,
                'summary_suffix': '.summary', 'grid_suffix': '.grid'},
 }
@@ -499,6 +502,35 @@ def save_grid(data, grid_path, cfg):
         savef(fh, **arrays)
 
 
+def save_energy_xyz(data, xyz_path):
+
+    """Write the CH4 energy / gradient grid as extended XYZ.
+
+        One line per grid point:  X  x y z  E  |grad E|
+        (Angstrom, kJ/mol, kJ mol^-1 A^-1).  The dummy element 'X' marks
+        non-atomic sample points; the two trailing data columns are read
+        as occupancy / beta-factor by VMD and as named extended-XYZ
+        columns by OVITO and most grid viewers.
+    """
+
+    import numpy as np
+
+    pts = data['grid'].detach().cpu().numpy()
+    energy = data['energies'].detach().cpu().numpy()
+    grad = data['gradients'].detach().cpu().numpy()
+    n = pts.shape[0]
+    header = (f'GPoreU CH4 energy grid: {n} points; '
+              f'columns: energy_kJ_mol grad_energy_kJ_mol_A')
+    symbols = 'X'
+    table = np.column_stack([pts, energy, grad]).astype(np.float64)
+    buf = io.StringIO()
+    np.savetxt(buf, table, fmt='%.4f %.4f %.4f %.6g %.6g')
+    with open(xyz_path, 'w') as fh:
+        fh.write(f'{n}\n{header}\n')
+        fh.writelines(f'{symbols} {line}\n'
+                      for line in buf.getvalue().splitlines())
+
+
 # ---------------------------------------------------------------------------
 # Input expansion / main
 # ---------------------------------------------------------------------------
@@ -591,6 +623,10 @@ def main(argv=None):
                     help='RNG seed (overrides config; default 0)')
     ap.add_argument('--save-grids', action='store_true',
                     help='also write NAME.grid with grid property arrays')
+    ap.add_argument('--save-xyz', action='store_true',
+                    help='also write NAME.energy.xyz: per-grid-point CH4 '
+                         'energy and |gradient| as extended XYZ (requires '
+                         'the energy_grid method)')
     ap.add_argument('--grid-format', choices=['npz', 'pt'], default=None,
                     help='grid dump format (default npz)')
     ap.add_argument('--explain', action='store_true',
@@ -632,6 +668,8 @@ def main(argv=None):
         cfg['seed'] = args.seed
     if args.save_grids:
         cfg['output']['save_grids'] = True
+    if args.save_xyz:
+        cfg['output']['save_xyz'] = True
     if args.grid_format:
         cfg['output']['grid_format'] = args.grid_format
 
@@ -675,6 +713,16 @@ def main(argv=None):
                 save_grid(data, grid_path, cfg)
                 print(f'  grid properties ->  {grid_path}')
                 done_files.append(grid_path)
+            if cfg['output']['save_xyz']:
+                if 'energies' in data:
+                    xyz_path = outdir / (cif.stem
+                                         + cfg['output']['xyz_suffix'])
+                    save_energy_xyz(data, xyz_path)
+                    print(f'  energy grid xyz ->  {xyz_path}')
+                    done_files.append(xyz_path)
+                else:
+                    print('  energy grid xyz: skipped '
+                          '(energy_grid method not run)', file=sys.stderr)
         except Exception as exc:                    # batch resilience
             failures += 1
             print(f'{tag}  FAILED: {type(exc).__name__}: {exc}',

@@ -14,7 +14,10 @@ A per-grid-point field (available in the pipeline dict and in
 | `ch4_gradient_kJ_mol_A` | magnitude \|∇U\| at each grid point, kJ mol⁻¹ Å⁻¹ |
 
 Optionally the 2D histogram of the pair
-([energy_histogram.md](energy_histogram.md)).
+([energy_histogram.md](energy_histogram.md)). Both fields are included
+in the `--save-grids` npz/pt dump; `--save-xyz` additionally writes
+`NAME.energy.xyz`, one line per grid point
+(`X x y z E |grad|`, extended XYZ for VMD/OVITO visualization).
 
 ## Theory
 

@@ -39,3 +39,10 @@ PY
 echo
 echo '# torch format instead (loads with torch.load):'
 echo "#   gporeu \"\$CIF\" -m pld --save-grids --grid-format pt -o $OUT"
+
+# The CH4 energy / |gradient| grid can also be dumped as extended XYZ
+# for visualization (VMD/OVITO); requires the energy_grid method.
+gporeu "$CIF" -m energy --save-xyz -o "$OUT"
+echo
+echo "--> $NAME.energy.xyz written to $OUT/ (first point):"
+head -3 "$OUT/$NAME.energy.xyz"
