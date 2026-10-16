@@ -1,0 +1,48 @@
+name: Publish to PyPI
+
+# Trusted publishing via GitHub Actions (no API token stored).
+# One-time setup on PyPI: account settings -> "Publishing" ->
+# "Add publisher": project `gporeu`, owner `AnstineResearchLab`,
+# repository `GPoreU`, workflow name `publish.yml`.
+#
+# Usage: publish a GitHub Release (or run this workflow manually
+# with `force = true`) to push the tagged version to PyPI.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Upload this checkout to TestPyPI instead of PyPI'
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build backend
+        run: python -m pip install --upgrade build twine
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+      - name: Check metadata
+        run: twine check dist/*
+
+      - name: Upload to TestPyPI (manual dispatch with force)
+        if: github.event_name == 'workflow_dispatch' && inputs.force
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+      - name: Upload to PyPI (on release publish)
+        if: github.event_name == 'release'
+        uses: pypa/gh-action-pypi-publish@release/v1

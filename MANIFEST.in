@@ -1,0 +1,4 @@
+# Include documentation and runnable examples in the source distribution
+# (the wheel ships only installable package data).
+recursive-include docs *.md
+recursive-include examples *.md *.py *.cif
