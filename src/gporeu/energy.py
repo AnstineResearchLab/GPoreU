@@ -674,11 +674,11 @@ def GPoreU_energy(data, rcut=12.0, delta=0.005, images=True, histogram=True):
 
 
 # ---------------------------------------------------------------------------
-# Free (probe-accessible) 2D energy histogram
+# Accessible-point (probe-accessible) 2D energy histogram
 # ---------------------------------------------------------------------------
 
 @triton.jit
-def histogram_2d_free_kernel(
+def histogram_2d_access_kernel(
     energy_ptr,
     hist_ptr,
     r_ptr,
@@ -702,7 +702,8 @@ def histogram_2d_free_kernel(
         field along the three lattice axes, and only accessible
         NEIGHBOURS are allowed to contribute to it: an inaccessible
         neighbour is dropped from the difference entirely (both
-        neighbours free -> central difference; exactly one free ->
+        neighbours accessible -> central difference; exactly one
+        accessible ->
         one-sided difference; none -> that axis contributes zero).
         Energy bin edges and gradient bin edges are the same fixed
         constants as histogram_2d_kernel.
@@ -814,7 +815,7 @@ def histogram_2d_free_kernel(
     )
 
 
-def build_2d_energy_histogram_free(
+def build_2d_energy_histogram_access(
     energies,
     nx,
     ny,
@@ -824,7 +825,7 @@ def build_2d_energy_histogram_free(
     threshold=0.0
 ):
 
-    """Free (probe-accessible) 2D energy/|gradient| histogram.
+    """Accessible-point (probe-restricted) 2D energy/|gradient| histogram.
 
         Restricts the fingerprint of build_2d_energy_histogram to grid
         points the CH4 probe can actually occupy: accessible means
@@ -835,7 +836,7 @@ def build_2d_energy_histogram_free(
         neighbour contributes nothing to the derivative.  Histogram
         counts therefore describe the texture of the probe-accessible
         space, and the normalized form divides by the number of
-        accessible points (conditional distribution over the free
+        accessible points (conditional distribution over the accessible
         region), rather than by the full grid count.
 
         Returns (histogram (5, 14) int32, histogram_normalized,
@@ -860,7 +861,7 @@ def build_2d_energy_histogram_free(
     launch_grid = (
         triton.cdiv(ngrid, BLOCK_SIZE),
     )
-    histogram_2d_free_kernel[launch_grid](
+    histogram_2d_access_kernel[launch_grid](
         energies.contiguous(),
         histogram,
         inv_cell.cuda(),

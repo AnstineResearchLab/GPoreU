@@ -1,7 +1,7 @@
-# Free (probe-accessible) 2D energy/gradient histogram
+# Accessible-point 2D energy/gradient histogram
 
-*CLI method: `free_energy_histogram` (aliases `fehist`, `free_ehist`) ·
-steps: `grids → energy_grid → free_energy_hist`*
+*CLI method: `access_energy_histogram` (aliases `acchist`, `acc_ehist`) ·
+steps: `grids → energy_grid → access_energy_hist`*
 
 Companion to [energy_histogram.md](energy_histogram.md). One call,
 same bin grid — but restricted to the space an actual probe can occupy,
@@ -10,13 +10,13 @@ with a gradient statistic that ignores directions blocked to the probe.
 ## What is reported
 
 ```
-free CH4 2D hist   : accessible 128580/274625 points (46.8%,
+access CH4 2D hist   : accessible 128580/274625 points (46.8%,
                      E < 0.00 kJ/mol) -> (5, 14) bins; normalized
                      over accessible points, sum 1.0000
 ```
 
-Pipeline keys: `free_energy_histogram` (int counts),
-`free_energy_histogram_normalized`, `free_energy_accessible_points`.
+Pipeline keys: `access_energy_histogram` (int counts),
+`access_energy_histogram_normalized`, `access_energy_accessible_points`.
 
 ## How it differs from the original histogram
 
@@ -30,14 +30,14 @@ texture:
    its own interaction energy:
 
    ```
-   accessible(g)  ⇔  U_CH4(g) < free_threshold   (default 0 kJ/mol)
+   accessible(g)  ⇔  U_CH4(g) < access_threshold   (default 0 kJ/mol)
    ```
 
    U < 0 means every framework atom is outside (or nearly outside) the
    repulsive core from that position — the probe center can sit there.
    The criterion is self-consistent with the energy model of the
    method (no extra probe mask needed: CH4 is its own occupancy test)
-   and configurable via `energy.free_threshold`.
+   and configurable via `energy.access_threshold`.
 
 2. **Neighbour-gated gradient.** The original |∇U| column comes from
    the analytic pair-force sum. Analytic gradients are exact but they
@@ -75,11 +75,12 @@ which is why this is a separate method, not a flag.
 Counts are normalized by the number of **accessible** points, not the
 whole cell: the matrix is the joint distribution of (U, |∇U|)
 *conditioned on the probe being able to sit at the sampled point*.
-This is the natural reading for a free-space descriptor; the original
+This is the natural reading for an accessible-space descriptor; the
+original
 remains available for the whole-cell volume-fraction view (see
 [energy_histogram.md](energy_histogram.md)). The summary reports the
 accessible fraction so the two views can be combined downstream
-(`free_hist × accessible_fraction` recovers a cell-normalized form).
+(`access_hist × accessible_fraction` recovers a cell-normalized form).
 
 ## Accuracy of the finite-difference gradient
 
@@ -121,10 +122,11 @@ binnings must be kept in sync if this ever changes.
 * **Opt-in, not replacing, the original**: the classic fingerprint is
   a literature-standard descriptor (comparability across structures
   and codes); this is a complementary, transport-flavoured view.
-  DEFAULT_METHODS keeps the original; `fehist` is requested
+  DEFAULT_METHODS keeps the original; `acchist` is requested
   explicitly.
 * **0-accessible is a valid result**: for a structure (or probe
-  threshold) where no grid point is free the histogram is all zeros —
+  threshold) where no grid point is accessible the histogram is all
+  zeros —
   the summary reports `0/… points` rather than failing; that itself
   is informative (e.g. CH4 sees no bindable space in WEI at the
   default grid, matching its impermeability).
@@ -133,8 +135,8 @@ binnings must be kept in sync if this ever changes.
 
 * The finite-difference gradient has O(h²) error scaling with grid
   spacing near steep fields — do not read absolute gradient rows as
-  analytic values; compare like-with-like (fehist vs fehist).
-* Threshold semantics: `free_threshold = 0` bakes the "net
+  analytic values; compare like-with-like (acchist vs acchist).
+* Threshold semantics: `access_threshold = 0` bakes the "net
   non-repulsive" convention into the accessible set; raising it
   includes shallow-repulsion points (smoother gate, different
   texture) — record the setting when comparing structures.
@@ -150,7 +152,7 @@ gporeu.grid.all_grids_pbc
 gporeu.energy.image_counts
 gporeu.energy.calculate_energy_gradient     # the energy field consumed here
   gporeu.energy.energy_gradient_kernel
-gporeu.energy.build_2d_energy_histogram_free
-  gporeu.energy.histogram_2d_free_kernel    # gated FD gradient + (5,14) binning
+gporeu.energy.build_2d_energy_histogram_access
+  gporeu.energy.histogram_2d_access_kernel    # gated FD gradient + (5,14) binning
 gporeu.cli.format_summary
 ```

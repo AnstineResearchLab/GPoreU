@@ -75,14 +75,14 @@ grids -> connectivity -> psd        (pore size distribution / FFV)
       ->            -> pld          (PLD + LCD, winding union-find)
       -> surface_area               (MC SASA)
       -> energy_grid -> energy_hist       (CH4 grids; 2D histogram)
-                     -> free_energy_hist  (accessible-point 2D histogram)
+                     -> access_energy_hist  (accessible-point 2D histogram)
 ```
 
 Names (aliases in brackets): `porosity`, `percolation`, `ffv`,
 `pore_size_distribution [psd]`, `surface_area [sa]`, `pore_network
 [poregraph, network]`, `pld`, `lcd`, `energy_grid [energy]`,
 `energy_histogram [ehist, 2d_energy_histogram]`,
-`free_energy_histogram [fehist, free_ehist]` (opt-in; not part of the
+`access_energy_histogram [acchist, acc_ehist]` (opt-in; not part of the
 default set). Default: full characterization. Example: `-m ehist` runs only
 `grids -> energy_grid -> energy_hist`; the pore graph is never built.
 

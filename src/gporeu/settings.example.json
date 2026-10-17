@@ -24,8 +24,8 @@
     "rcut": 12.0,
     "delta": 0.005,
     "images": true,
-    "free_threshold": 0.0,
-    "_comment": "images=true performs exact periodic image enumeration at the cutoff; REQUIRED (min-image-only is wrong) whenever any cell width < 2*rcut. free_threshold [kJ/mol]: CH4 energies below this count as probe-accessible for the free_energy_histogram method."
+    "access_threshold": 0.0,
+    "_comment": "images=true performs exact periodic image enumeration at the cutoff; REQUIRED (min-image-only is wrong) whenever any cell width < 2*rcut. access_threshold [kJ/mol]: CH4 energies below this count as probe-accessible for the access_energy_histogram method."
   },
 
   "output": {
