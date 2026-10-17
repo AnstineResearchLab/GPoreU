@@ -8,6 +8,10 @@ name: Publish to PyPI
 # Usage: publish a GitHub Release (or run this workflow manually
 # with `force = true`) to push the tagged version to PyPI.
 
+permissions:
+  contents: read
+  id-token: write        # required for trusted publishing (OIDC token)
+
 on:
   release:
     types: [published]
