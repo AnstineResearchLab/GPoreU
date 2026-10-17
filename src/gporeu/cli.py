@@ -48,6 +48,7 @@ STEP_ORDER = [
     'pld',
     'energy_grid',
     'energy_hist',
+    'free_energy_hist',
 ]
 
 STEP_REQUIRES = {
@@ -59,6 +60,7 @@ STEP_REQUIRES = {
     'pld':          ['connectivity'],          # consumes ij_geo adjacency
     'energy_grid':  ['grids'],                 # evaluated on grid points
     'energy_hist':  ['energy_grid'],           # 2D histogram of E, |grad E|
+    'free_energy_hist': ['energy_grid'],       # accessible-point histogram
 }
 
 
@@ -114,6 +116,19 @@ def _step_energy_hist(data, cfg):
     data['energy_histogram_normalized'] = hist_norm
 
 
+def _step_free_energy_hist(data, cfg):
+    from .energy import build_2d_energy_histogram_free
+    threshold = float(cfg['energy'].get('free_threshold', 0.0))
+    hist, hist_norm, n_acc = build_2d_energy_histogram_free(
+        data['energies'],
+        int(data['nx']), int(data['ny']), int(data['nz']),
+        data['cell'], float(cfg['grid_spacing']),
+        threshold=threshold)
+    data['free_energy_histogram'] = hist
+    data['free_energy_histogram_normalized'] = hist_norm
+    data['free_energy_accessible_points'] = n_acc
+
+
 STEP_RUNNERS = {
     'grids':        _step_grids,
     'connectivity': _step_connectivity,
@@ -123,6 +138,7 @@ STEP_RUNNERS = {
     'pld':          _step_pld,
     'energy_grid':  _step_energy_grid,
     'energy_hist':  _step_energy_hist,
+    'free_energy_hist': _step_free_energy_hist,
 }
 
 STEP_LABELS = {
@@ -134,6 +150,7 @@ STEP_LABELS = {
     'pld':          'PLD / LCD (winding union-find)',
     'energy_grid':  'CH4 energy + gradient grid',
     'energy_hist':  '2D energy histogram (E, |grad E|)',
+    'free_energy_hist': 'free 2D energy histogram (accessible points)',
 }
 
 # ---------------------------------------------------------------------------
@@ -173,6 +190,11 @@ METHODS = {
     'energy_histogram': dict(
         steps=['energy_hist'], aliases=['ehist', '2d_energy_histogram'],
         help='2D energy/|gradient| histogram (pulls in the CH4 energy grid)'),
+    'free_energy_histogram': dict(
+        steps=['free_energy_hist'], aliases=['fehist', 'free_ehist'],
+        help='2D energy/|gradient| histogram over probe-accessible points '
+             'only; finite-difference |gradient| with no contribution from '
+             'inaccessible neighbours'),
 }
 
 DEFAULT_METHODS = ['porosity', 'percolation', 'ffv', 'pore_size_distribution',
@@ -231,7 +253,8 @@ DEFAULT_CONFIG = {
     'psd_bin_size': 0.25,
     'psd_max_pore': 20.0,
     'pore_network': {'wall_thickness': 1.0, 'safe_buffer': 6.0},
-    'energy': {'rcut': 12.0, 'delta': 0.005, 'images': True},
+    'energy': {'rcut': 12.0, 'delta': 0.005, 'images': True,
+               'free_threshold': 0.0},
     'output': {'save_grids': False, 'grid_format': 'npz',
                'save_xyz': False, 'xyz_suffix': '.energy.xyz',
                'compress': False,
@@ -444,6 +467,19 @@ def format_summary(data, cif_path, cfg, requested, steps, timings):
         L.append(f'  CH4 2D histogram   : {int(h.sum().item())} grid points '
                  f'-> {tuple(h.shape)} (E x |grad E|) bins; '
                  f'normalized sum {float(hn.sum().item()):.4f}')
+
+    if ('free_energy_histogram' in req
+            and 'free_energy_histogram' in data):
+        h = data['free_energy_histogram']
+        hn = data['free_energy_histogram_normalized']
+        n_acc = int(data['free_energy_accessible_points'])
+        n_tot = data['energies'].numel()
+        thr = float(cfg['energy'].get('free_threshold', 0.0))
+        frac = n_acc / n_tot if n_tot else 0.0
+        L.append(f'  free CH4 2D hist   : accessible {n_acc}/{n_tot} points '
+                 f'({frac * 100:.1f}%, E < {thr:.2f} kJ/mol) -> '
+                 f'{tuple(h.shape)} bins; normalized over accessible points, '
+                 f'sum {float(hn.sum().item()):.4f}')
 
     L.append('-' * W)
     order = ' -> '.join(steps)

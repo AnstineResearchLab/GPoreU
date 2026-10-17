@@ -45,8 +45,33 @@ def test_subset_skips_unrelated_steps():
 
 
 def test_default_plan_covers_everything():
+    # The default method set excludes opt-in steps (histogram variants);
+    # the default plan must equal the canonical STEP_ORDER restricted to
+    # steps the defaults actually need, in canonical order.
     steps, _ = plan_steps(DEFAULT_CONFIG['methods'])
-    assert steps == STEP_ORDER
+    needed = set()
+    for m in DEFAULT_CONFIG['methods']:
+        for s in METHODS[m]['steps']:
+            frontier = [s]
+            while frontier:
+                cur = frontier.pop()
+                if cur not in needed:
+                    needed.add(cur)
+                    frontier += STEP_REQUIRES[cur]
+    expected = [s for s in STEP_ORDER if s in needed]
+    assert steps == expected
+
+
+def test_every_step_reachable_from_some_method():
+    reachable = set()
+    for m, d in METHODS.items():
+        frontier = list(d['steps'])
+        while frontier:
+            cur = frontier.pop()
+            if cur not in reachable:
+                reachable.add(cur)
+                frontier += STEP_REQUIRES[cur]
+    assert reachable == set(STEP_ORDER)
 
 
 def test_why_explains_chains():

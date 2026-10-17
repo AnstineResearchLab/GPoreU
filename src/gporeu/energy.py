@@ -671,3 +671,227 @@ def GPoreU_energy(data, rcut=12.0, delta=0.005, images=True, histogram=True):
 
 
     return out
+
+
+# ---------------------------------------------------------------------------
+# Free (probe-accessible) 2D energy histogram
+# ---------------------------------------------------------------------------
+
+@triton.jit
+def histogram_2d_free_kernel(
+    energy_ptr,
+    hist_ptr,
+    r_ptr,
+    NX,
+    NY,
+    NZ,
+    HSTEP,
+    THRESH,
+    LENX,
+    LENY,
+    LENZ,
+    NGRID,
+    BLOCK_SIZE: tl.constexpr
+):
+    """Bin probe-accessible grid points into a 5 x 14 2D histogram.
+
+        A grid point is accessible to the probe when its interaction
+        energy lies below ``THRESH`` (default 0 kJ/mol: points inside
+        the repulsive wall are excluded).  The |gradient| coordinate is
+        a periodic central/one-sided finite difference of the energy
+        field along the three lattice axes, and only accessible
+        NEIGHBOURS are allowed to contribute to it: an inaccessible
+        neighbour is dropped from the difference entirely (both
+        neighbours free -> central difference; exactly one free ->
+        one-sided difference; none -> that axis contributes zero).
+        Energy bin edges and gradient bin edges are the same fixed
+        constants as histogram_2d_kernel.
+    """
+    offsets = (
+        tl.program_id(0) * BLOCK_SIZE
+        + tl.arange(0, BLOCK_SIZE)
+    )
+    mask = offsets < NGRID
+
+    e0 = tl.load(energy_ptr + offsets, mask=mask, other=1.0e20)
+    acc0 = e0 < THRESH
+
+    # 3D index of each point (x outer, z inner, matching the grid mesh).
+    ix = offsets // (NY * NZ)
+    iy = (offsets // NZ) % NY
+    iz = offsets % NZ
+    base_yz = iy * NZ + iz
+
+    # Reciprocal cell (row-major inverse of the lattice-vector matrix);
+    # Cartesian gradient components follow from the fractional-basis
+    # directional derivatives: grad_k = sum_j R[j, k] * gf_j.
+    r00 = tl.load(r_ptr + 0)
+    r01 = tl.load(r_ptr + 1)
+    r02 = tl.load(r_ptr + 2)
+    r10 = tl.load(r_ptr + 3)
+    r11 = tl.load(r_ptr + 4)
+    r12 = tl.load(r_ptr + 5)
+    r20 = tl.load(r_ptr + 6)
+    r21 = tl.load(r_ptr + 7)
+    r22 = tl.load(r_ptr + 8)
+
+    # --- x axis (periodic neighbours) ---------------------------------
+    ip = (((ix + 1) % NX) * NY * NZ) + base_yz
+    im = (((ix - 1 + NX) % NX) * NY * NZ) + base_yz
+    ep = tl.load(energy_ptr + ip, mask=mask, other=1.0e20)
+    em = tl.load(energy_ptr + im, mask=mask, other=1.0e20)
+    fp = ep < THRESH
+    fm = em < THRESH
+    dxe = tl.where(fp & fm, 0.5 * (ep - em),
+          tl.where(fp, ep - e0,
+          tl.where(fm, e0 - em, 0.0)))
+    gfx = dxe * LENX / HSTEP
+
+    # --- y axis ---------------------------------------------------------
+    ip = (ix * NY * NZ) + (((iy + 1) % NY) * NZ) + iz
+    im = (ix * NY * NZ) + (((iy - 1 + NY) % NY) * NZ) + iz
+    ep = tl.load(energy_ptr + ip, mask=mask, other=1.0e20)
+    em = tl.load(energy_ptr + im, mask=mask, other=1.0e20)
+    fp = ep < THRESH
+    fm = em < THRESH
+    dye = tl.where(fp & fm, 0.5 * (ep - em),
+          tl.where(fp, ep - e0,
+          tl.where(fm, e0 - em, 0.0)))
+    gfy = dye * LENY / HSTEP
+
+    # --- z axis ---------------------------------------------------------
+    ip = (ix * NY * NZ) + (iy * NZ) + ((iz + 1) % NZ)
+    im = (ix * NY * NZ) + (iy * NZ) + ((iz - 1 + NZ) % NZ)
+    ep = tl.load(energy_ptr + ip, mask=mask, other=1.0e20)
+    em = tl.load(energy_ptr + im, mask=mask, other=1.0e20)
+    fp = ep < THRESH
+    fm = em < THRESH
+    dze = tl.where(fp & fm, 0.5 * (ep - em),
+          tl.where(fp, ep - e0,
+          tl.where(fm, e0 - em, 0.0)))
+    gfz = dze * LENZ / HSTEP
+
+    # Cartesian gradient magnitude (triclinic-safe via the reciprocal
+    # cell; the axes are not orthogonal, so the components cannot just
+    # be squared and summed in the lattice basis).
+    gxc = r00 * gfx + r10 * gfy + r20 * gfz
+    gyc = r01 * gfx + r11 * gfy + r21 * gfz
+    gzc = r02 * gfx + r12 * gfy + r22 * gfz
+    gradient = tl.sqrt(gxc * gxc + gyc * gyc + gzc * gzc)
+
+    # Same fixed bin edges as histogram_2d_kernel.
+    energy = e0
+    energy_bin = tl.floor(
+        (energy + 24.0) / 2.0
+    ).to(tl.int32)
+    energy_bin = energy_bin + 1
+    energy_bin = tl.where(
+        energy < -24.0,
+        0,
+        energy_bin
+    )
+    energy_bin = tl.where(
+        energy >= 0.0,
+        13,
+        energy_bin
+    )
+    gradient_bin = tl.floor(
+        gradient / 28.0
+    ).to(tl.int32)
+    gradient_bin = tl.where(
+        gradient >= 112.0,
+        4,
+        gradient_bin
+    )
+    histogram_index = (
+        gradient_bin * 14
+        + energy_bin
+    )
+    tl.atomic_add(
+        hist_ptr + histogram_index,
+        1,
+        mask=mask & acc0
+    )
+
+
+def build_2d_energy_histogram_free(
+    energies,
+    nx,
+    ny,
+    nz,
+    cell,
+    spacing,
+    threshold=0.0
+):
+
+    """Free (probe-accessible) 2D energy/|gradient| histogram.
+
+        Restricts the fingerprint of build_2d_energy_histogram to grid
+        points the CH4 probe can actually occupy: accessible means
+        ``energy < threshold`` (default: non-positive interaction
+        energy, i.e. outside the repulsive wall).  The |gradient|
+        coordinate is recomputed as a periodic finite difference of the
+        energy field over ACCESSIBLE neighbours only -- an inaccessible
+        neighbour contributes nothing to the derivative.  Histogram
+        counts therefore describe the texture of the probe-accessible
+        space, and the normalized form divides by the number of
+        accessible points (conditional distribution over the free
+        region), rather than by the full grid count.
+
+        Returns (histogram (5, 14) int32, histogram_normalized,
+        n_accessible).
+    """
+
+    ngrid = energies.numel()
+    counts = torch.where(energies < threshold, 1, 0)
+    n_accessible = int(counts.sum().item())
+
+    histogram = torch.zeros(
+        70,
+        device='cuda',
+        dtype=torch.int32
+    )
+
+    cell_d = cell.detach().double()
+    inv_cell = torch.linalg.inv(cell_d).float().contiguous()
+    lengths = torch.linalg.norm(cell_d, dim=1).float()
+
+    BLOCK_SIZE = 256
+    launch_grid = (
+        triton.cdiv(ngrid, BLOCK_SIZE),
+    )
+    histogram_2d_free_kernel[launch_grid](
+        energies.contiguous(),
+        histogram,
+        inv_cell.cuda(),
+        int(nx),
+        int(ny),
+        int(nz),
+        float(spacing),
+        float(threshold),
+        float(lengths[0]),
+        float(lengths[1]),
+        float(lengths[2]),
+        ngrid,
+        BLOCK_SIZE=BLOCK_SIZE
+    )
+    torch.cuda.synchronize()
+
+    histogram = histogram.reshape(
+        5,
+        14
+    )
+    if n_accessible:
+        histogram_normalized = (
+            histogram.to(torch.float32)
+            / n_accessible
+        )
+    else:
+        histogram_normalized = torch.zeros(
+            5,
+            14,
+            device='cuda',
+            dtype=torch.float32
+        )
+
+    return histogram, histogram_normalized, n_accessible

@@ -20,6 +20,7 @@ choice, and an ordered list of the GPoreU functions each method calls.
 | `lcd` | [lcd.md](lcd.md) | largest cavity diameter |
 | `energy_grid` (`energy`) | [energy_grid.md](energy_grid.md) | CH4 interaction-energy and gradient fields |
 | `energy_histogram` (`ehist`) | [energy_histogram.md](energy_histogram.md) | 2D (energy, \|gradient\|) histogram |
+| `free_energy_histogram` (`fehist`) | [free_energy_histogram.md](free_energy_histogram.md) | accessible-point-restricted 2D histogram with neighbour-gated finite-difference gradient |
 
 Each document is self-contained: repetition of shared background is
 intentional so that any method can be read in isolation.
