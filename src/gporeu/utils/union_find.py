@@ -20,7 +20,9 @@ import triton.language as tl
 
 
 # -------------------------------------------------------------- CC paths ---
-@triton.jit
+# do_not_specialize: per-structure sizes must not fragment the Triton
+# JIT cache (value-specialized ints/constexpr each compile a fresh binary).
+@triton.jit(do_not_specialize=["E", "maxh"])
 def _cc_merge_kernel(u_ptr, v_ptr, par_ptr, prog_ptr, ofl_ptr, E, maxh,
                      BLOCK: tl.constexpr):
     """Find both endpoint roots; crossing edges link min-root under
@@ -64,7 +66,9 @@ def _cc_merge_kernel(u_ptr, v_ptr, par_ptr, prog_ptr, ofl_ptr, E, maxh,
     tl.atomic_add(prog_ptr, tl.sum(ok.to(tl.int32), axis=0))
 
 
-@triton.jit
+# do_not_specialize: per-structure sizes must not fragment the Triton
+# JIT cache (value-specialized ints/constexpr each compile a fresh binary).
+@triton.jit(do_not_specialize=["N", "maxh"])
 def _cc_final_kernel(par_ptr, root_ptr, N, maxh, ofl_ptr, BLOCK: tl.constexpr):
     pid = tl.program_id(0)
     i = pid * BLOCK + tl.arange(0, BLOCK)
@@ -82,7 +86,9 @@ def _cc_final_kernel(par_ptr, root_ptr, N, maxh, ofl_ptr, BLOCK: tl.constexpr):
 
 
 
-@triton.jit
+# do_not_specialize: per-structure sizes must not fragment the Triton
+# JIT cache (value-specialized ints/constexpr each compile a fresh binary).
+@triton.jit(do_not_specialize=["N"])
 def _split_kernel(par_ptr, N, BLOCK: tl.constexpr):
     """One path-splitting pass: par[i] <- par[par[i]].  Ancestor pointers
     stay valid ancestors so the forest is preserved, but tree depth is
@@ -154,7 +160,9 @@ def components(N, u, v, max_rounds=200):
 
 
 # ------------------------------------------------------------ max-ST path ---
-@triton.jit
+# do_not_specialize: per-structure sizes must not fragment the Triton
+# JIT cache (value-specialized ints/constexpr each compile a fresh binary).
+@triton.jit(do_not_specialize=["E", "maxh"])
 def _ms_find(u_ptr, v_ptr, par_ptr, ru_ptr, rv_ptr, E, maxh, ofl_ptr,
              BLOCK: tl.constexpr):
     pid = tl.program_id(0)
@@ -179,7 +187,9 @@ def _ms_find(u_ptr, v_ptr, par_ptr, ru_ptr, rv_ptr, E, maxh, ofl_ptr,
     tl.store(rv_ptr + i, rv, mask=m)
 
 
-@triton.jit
+# do_not_specialize: per-structure sizes must not fragment the Triton
+# JIT cache (value-specialized ints/constexpr each compile a fresh binary).
+@triton.jit(do_not_specialize=["E"])
 def _ms_best(ru_ptr, rv_ptr, w_ptr, best_ptr, cnt_ptr, E, BLOCK: tl.constexpr):
     pid = tl.program_id(0)
     i = pid * BLOCK + tl.arange(0, BLOCK)
@@ -196,7 +206,9 @@ def _ms_best(ru_ptr, rv_ptr, w_ptr, best_ptr, cnt_ptr, E, BLOCK: tl.constexpr):
     tl.atomic_max(best_ptr + rv, pack)
 
 
-@triton.jit
+# do_not_specialize: per-structure sizes must not fragment the Triton
+# JIT cache (value-specialized ints/constexpr each compile a fresh binary).
+@triton.jit(do_not_specialize=["N"])
 def _ms_ballot(best_ptr, ru_ptr, rv_ptr, ballot_ptr, N, BLOCK: tl.constexpr):
     pid = tl.program_id(0)
     r = pid * BLOCK + tl.arange(0, BLOCK)
@@ -214,7 +226,9 @@ def _ms_ballot(best_ptr, ru_ptr, rv_ptr, ballot_ptr, N, BLOCK: tl.constexpr):
     tl.atomic_max(ballot_ptr + c, claim)
 
 
-@triton.jit
+# do_not_specialize: per-structure sizes must not fragment the Triton
+# JIT cache (value-specialized ints/constexpr each compile a fresh binary).
+@triton.jit(do_not_specialize=["N", "E"])
 def _ms_hook(par_ptr, best_ptr, ballot_ptr, ru_ptr, rv_ptr, prog_ptr,
              ew_ptr, N, E, BLOCK: tl.constexpr):
     pid = tl.program_id(0)
@@ -246,7 +260,9 @@ def _ms_hook(par_ptr, best_ptr, ballot_ptr, ru_ptr, rv_ptr, prog_ptr,
     tl.store(ew_ptr + c, w, mask=tok)
 
 
-@triton.jit
+# do_not_specialize: per-structure sizes must not fragment the Triton
+# JIT cache (value-specialized ints/constexpr each compile a fresh binary).
+@triton.jit(do_not_specialize=["N"])
 def _ms_edges(par_ptr, ew_ptr, src_ptr, dst_ptr, w_ptr, nout_ptr, N,
               BLOCK: tl.constexpr):
     pid = tl.program_id(0)

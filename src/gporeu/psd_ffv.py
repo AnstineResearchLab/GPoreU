@@ -23,7 +23,9 @@ import triton.language as tl
 from .utils import prof
 
 
-@triton.jit
+# do_not_specialize: per-structure sizes must not fragment the Triton
+# JIT cache (value-specialized ints/constexpr each compile a fresh binary).
+@triton.jit(do_not_specialize=["N_CAND", "N_RP"])
 def GPoreU_PSD_Kernel(
     N_CAND,
     N_RP,

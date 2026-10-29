@@ -226,7 +226,9 @@ def GPoreU_apply_pbc(pore_labels, merged_maxima_ids, grid_radaii, wall_thickness
         prof.mark('  pbc:returned')
         return pore_labels, merged_maxima_ids, periodic_label_map, periodic_pairs
 
-@triton.jit
+# do_not_specialize: per-structure sizes must not fragment the Triton
+# JIT cache (value-specialized ints/constexpr each compile a fresh binary).
+@triton.jit(do_not_specialize=["NGRID", "num_pores"])
 def GPoreU_SafeRegion_Kernel(grid, merged_maxima_ids, safe_radaii, geo_grid_occ, pore_labels, safe_mask, NGRID, num_pores, BLOCKSIZE: tl.constexpr):
 
         """Kernel: assign voxels claimed by exactly one safe center
@@ -283,7 +285,9 @@ def GPoreU_SafeRegion_Kernel(grid, merged_maxima_ids, safe_radaii, geo_grid_occ,
         tl.store(pore_labels + offsets, labels, mask=valid)
         tl.store(safe_mask + offsets, safe, mask=valid)
 
-@triton.jit
+# do_not_specialize: per-structure sizes must not fragment the Triton
+# JIT cache (value-specialized ints/constexpr each compile a fresh binary).
+@triton.jit(do_not_specialize=["nx", "ny", "nz", "NGRID"])
 def GPoreU_Flood_Sweep_Kernel(
         cap_src, lbl_src, cap_dst, lbl_dst, rad_ptr, comp_ptr, flag_ptr,
         nx, ny, nz, NGRID, BLOCKSIZE: tl.constexpr):
@@ -515,7 +519,9 @@ def GPoreU_safe_watershed(_input, merged_maxima_ids, wall_thickness, grid_spacin
 # ------------------------------------------------------------ pore graph ----
 
 
-@triton.jit
+# do_not_specialize: per-structure sizes must not fragment the Triton
+# JIT cache (value-specialized ints/constexpr each compile a fresh binary).
+@triton.jit(do_not_specialize=["n_ij"])
 def _local_maxima_kernel(
     grid_radaii_ptr,
     ij_geo_ptr,
@@ -558,7 +564,9 @@ def maximum_spanning_tree(ij_geo, grid_radaii):
     return max_st(n_nodes, i, j, edge_radii)
 
 
-@triton.jit
+# do_not_specialize: per-structure sizes must not fragment the Triton
+# JIT cache (value-specialized ints/constexpr each compile a fresh binary).
+@triton.jit(do_not_specialize=["n_edges"])
 def _hmax_kernel(
     src_ptr,
     dst_ptr,

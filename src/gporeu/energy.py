@@ -17,7 +17,9 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
+# do_not_specialize: per-structure sizes must not fragment the Triton
+# JIT cache (value-specialized ints/constexpr each compile a fresh binary).
+@triton.jit(do_not_specialize=["NATOMS", "NGRID", "KXIMG", "KYIMG", "KZIMG"])
 def energy_gradient_kernel(
     grid_ptr,
     coord_ptr,
@@ -31,11 +33,11 @@ def energy_gradient_kernel(
     PROBE_EPSILON: tl.constexpr,
     RCUT: tl.constexpr,
     DEL: tl.constexpr,
-    NATOMS: tl.constexpr,
-    NGRID: tl.constexpr,
-    KXIMG: tl.constexpr,
-    KYIMG: tl.constexpr,
-    KZIMG: tl.constexpr,
+    NATOMS,
+    NGRID,
+    KXIMG,
+    KYIMG,
+    KZIMG,
     BLOCK_GRID: tl.constexpr,
     BLOCK_ATOMS: tl.constexpr
 ):
@@ -355,12 +357,14 @@ def energy_gradient_kernel(
 
 
 
-@triton.jit
+# do_not_specialize: per-structure sizes must not fragment the Triton
+# JIT cache (value-specialized ints/constexpr each compile a fresh binary).
+@triton.jit(do_not_specialize=["NGRID"])
 def histogram_2d_kernel(
     energy_ptr,
     gradient_ptr,
     histogram_ptr,
-    NGRID: tl.constexpr,
+    NGRID,
     BLOCK_SIZE: tl.constexpr
 ):
 
@@ -677,7 +681,9 @@ def GPoreU_energy(data, rcut=12.0, delta=0.005, images=True, histogram=True):
 # Accessible-point (probe-accessible) 2D energy histogram
 # ---------------------------------------------------------------------------
 
-@triton.jit
+# do_not_specialize: per-structure sizes must not fragment the Triton
+# JIT cache (value-specialized ints/constexpr each compile a fresh binary).
+@triton.jit(do_not_specialize=["NX", "NY", "NZ", "NGRID"])
 def histogram_2d_access_kernel(
     energy_ptr,
     hist_ptr,

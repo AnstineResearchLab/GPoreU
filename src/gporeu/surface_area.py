@@ -21,7 +21,9 @@ from .utils import prof
 SAMPLES_PER_ATOM = 512
 
 
-@triton.jit
+# do_not_specialize: per-structure sizes must not fragment the Triton
+# JIT cache (value-specialized ints/constexpr each compile a fresh binary).
+@triton.jit(do_not_specialize=["NATOMS"])
 def GPoreU_SA_Kernel(
     coord_ptr,
     sigmas_ptr,
@@ -31,7 +33,7 @@ def GPoreU_SA_Kernel(
     n_sigma_ptr,
     accessible_count_ptr,
     surface_radius_ptr,
-    NATOMS: tl.constexpr,
+    NATOMS,
     SAMP: tl.constexpr,
     BLOCK_ATOMS: tl.constexpr,
 ):

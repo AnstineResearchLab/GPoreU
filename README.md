@@ -156,6 +156,14 @@ Stochastic stages (PSD sampling, surface-area Monte-Carlo) are seeded per
 structure (`seed`, default 0). `GPOREU_VERBOSE=1` re-enables stage
 diagnostics; `GPOREU_PROFILE=1` prints pore-graph section timings.
 
+Triton kernels are JIT-compiled once per kernel (structure sizes are
+runtime values and never re-trigger compilation): expect a one-time
+few-second compile on the first structure after installation or a
+kernel change, then instant launches from the on-disk Triton cache
+(`TRITON_CACHE_DIR`, default `~/.triton/cache`). Keep that directory
+persistent (not ephemeral/scratch-erased) on clusters so batches skip
+the compile entirely.
+
 ## Tests
 
 ```bash

@@ -12,7 +12,9 @@ import torch
 import triton
 import triton.language as tl
 
-@triton.jit
+# do_not_specialize: per-structure sizes must not fragment the Triton
+# JIT cache (value-specialized ints/constexpr each compile a fresh binary).
+@triton.jit(do_not_specialize=["NGRID", "NATOMS"])
 def GPoreU_Lattice_Kernel(
                             coord_ptr,
                             grid_ptr,
@@ -23,8 +25,8 @@ def GPoreU_Lattice_Kernel(
                             n_grid_occ_ptr,
                             he_lj_energy_ptr,
                             n_lj_energy_ptr,
-                            NGRID: tl.constexpr,
-                            NATOMS: tl.constexpr,
+                            NGRID,
+                            NATOMS,
                             sigmas_ptr,
                             he_sigma_ptr,
                             n_sigma_ptr,

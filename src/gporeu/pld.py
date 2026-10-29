@@ -66,7 +66,9 @@ import triton.language as tl
 
 from .utils import prof
 
-@triton.jit
+# do_not_specialize: per-structure sizes must not fragment the Triton
+# JIT cache (value-specialized ints/constexpr each compile a fresh binary).
+@triton.jit(do_not_specialize=["E", "nstride", "maxh"])
 def _find_kernel(u_ptr, v_ptr, par_ptr, pot_ptr,
                  ru_ptr, rv_ptr, pu_ptr, pv_ptr,
                  E, nstride, maxh, ofl_ptr, BLOCK: tl.constexpr):
@@ -130,7 +132,9 @@ def _find_kernel(u_ptr, v_ptr, par_ptr, pot_ptr,
     tl.store(pv_ptr + 2 * E + i, av2, mask=m)
 
 
-@triton.jit
+# do_not_specialize: per-structure sizes must not fragment the Triton
+# JIT cache (value-specialized ints/constexpr each compile a fresh binary).
+@triton.jit(do_not_specialize=["E"])
 def _best_kernel(ru_ptr, rv_ptr, w_ptr, best_ptr, cnt_ptr, E,
                  BLOCK: tl.constexpr):
     """Heaviest crossing edge per component; count crossing edges."""
@@ -151,7 +155,9 @@ def _best_kernel(ru_ptr, rv_ptr, w_ptr, best_ptr, cnt_ptr, E,
     tl.atomic_max(best_ptr + rv, pack)
 
 
-@triton.jit
+# do_not_specialize: per-structure sizes must not fragment the Triton
+# JIT cache (value-specialized ints/constexpr each compile a fresh binary).
+@triton.jit(do_not_specialize=["N"])
 def _ballot_kernel(best_ptr, ru_ptr, rv_ptr, ballot_ptr, N,
                    BLOCK: tl.constexpr):
     """Claim child slot c=min(r, partner) with (weight_bits << 32) | r."""
@@ -171,7 +177,9 @@ def _ballot_kernel(best_ptr, ru_ptr, rv_ptr, ballot_ptr, N,
     tl.atomic_max(ballot_ptr + c, claim)
 
 
-@triton.jit
+# do_not_specialize: per-structure sizes must not fragment the Triton
+# JIT cache (value-specialized ints/constexpr each compile a fresh binary).
+@triton.jit(do_not_specialize=["N", "E", "nstride"])
 def _hook_kernel(par_ptr, pot_ptr, best_ptr, ballot_ptr, prog_ptr,
                  W_ptr, ru_ptr, rv_ptr, pu_ptr, pv_ptr,
                  N, E, nstride, BLOCK: tl.constexpr):
@@ -225,7 +233,9 @@ def _hook_kernel(par_ptr, pot_ptr, best_ptr, ballot_ptr, prog_ptr,
     tl.store(pot_ptr + 2 * nstride + c, v2k, mask=tok)
 
 
-@triton.jit
+# do_not_specialize: per-structure sizes must not fragment the Triton
+# JIT cache (value-specialized ints/constexpr each compile a fresh binary).
+@triton.jit(do_not_specialize=["E"])
 def _score_kernel(pu_ptr, pv_ptr, W_ptr, g_ptr, E, BLOCK: tl.constexpr):
     """g = (P(v) - P(u)) - W for every edge (endpoints already at roots)."""
     pid = tl.program_id(0)
