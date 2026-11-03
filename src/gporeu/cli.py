@@ -5,6 +5,7 @@ Run pore characterization on one CIF file or a whole directory of them.
     gporeu structure.cif
     gporeu ./cifs/ -o ./results --save-grids
     gporeu ./cifs/ -m pld,porosity -c settings.json
+    gporeu ./cifs/ -q          # silent batch: files only, no terminal output
     gporeu --list-methods
 
 The workflow is driven by a method registry: each user-facing METHOD is
@@ -684,6 +685,10 @@ def main(argv=None):
                          'FILE and exit')
     ap.add_argument('-v', '--verbose', action='store_true',
                     help='show stage diagnostics (prints, profiler off)')
+    ap.add_argument('-q', '--quiet', action='store_true',
+                    help='print nothing to stdout: no per-file summaries or '
+                         'progress lines (output files are written as '
+                         'usual; failures still report one line on stderr)')
     args = ap.parse_args(argv)
 
     if args.list_methods:
@@ -746,35 +751,43 @@ def main(argv=None):
         data = None
         try:
             data, steps, why, timings = run_one(cif, cfg,
-                                                verbose=args.verbose)
+                                                verbose=args.verbose and
+                                                not args.quiet)
             text = format_summary(data, cif, cfg, cfg['methods'], steps,
                                   timings)
-            print(f'--- {tag} ' + '-' * max(0, 60 - len(tag)))
-            print(text, flush=True)
+            if not args.quiet:
+                print(f'--- {tag} ' + '-' * max(0, 60 - len(tag)))
+                print(text, flush=True)
             summary_path = outdir / (cif.stem + cfg['output']['summary_suffix'])
             summary_path.write_text(text + '\n')
             done_files.append(summary_path)
             if cfg['output']['save_grids']:
                 grid_path = outdir / (cif.stem + cfg['output']['grid_suffix'])
                 save_grid(data, grid_path, cfg)
-                print(f'  grid properties ->  {grid_path}')
+                if not args.quiet:
+                    print(f'  grid properties ->  {grid_path}')
                 done_files.append(grid_path)
             if cfg['output']['save_xyz']:
                 if 'energies' in data:
                     xyz_path = outdir / (cif.stem
                                          + cfg['output']['xyz_suffix'])
                     save_energy_xyz(data, xyz_path)
-                    print(f'  energy grid xyz ->  {xyz_path}')
+                    if not args.quiet:
+                        print(f'  energy grid xyz ->  {xyz_path}')
                     done_files.append(xyz_path)
                 else:
                     print('  energy grid xyz: skipped '
                           '(energy_grid method not run)', file=sys.stderr)
         except Exception as exc:                    # batch resilience
             failures += 1
+            # one informative line survives --quiet: a silent batch must
+            # never hide WHICH structures failed (the summary files on
+            # disk carry the same message, stderr is the live view).
             print(f'{tag}  FAILED: {type(exc).__name__}: {exc}',
                   file=sys.stderr)
-            import traceback
-            traceback.print_exc()
+            if not args.quiet:
+                import traceback
+                traceback.print_exc()
             err_path = outdir / (cif.stem + cfg['output']['summary_suffix'])
             err_path.write_text(f'{cif.name}: ERROR {type(exc).__name__} '
                                 f'{exc}\n')
@@ -782,7 +795,7 @@ def main(argv=None):
             data = None
             torch.cuda.empty_cache()
 
-    if len(files) > 1:
+    if len(files) > 1 and not args.quiet:
         print(f'\nprocessed {len(files) - failures}/{len(files)} structures '
               f'-> {outdir.resolve()}')
     return 1 if failures else 0
