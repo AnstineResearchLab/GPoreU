@@ -379,7 +379,30 @@ def GPoreU_safe_watershed(_input, merged_maxima_ids, wall_thickness, grid_spacin
         num_pores = merged_maxima_ids.numel()
 
         if num_pores == 0:
-                raise ValueError('No pore centers were supplied.')
+                # A truly non-porous structure legitimately has no H-maxima:
+                # report an empty pore network instead of failing the whole
+                # file, so the other requested methods still deliver.
+                nxv, nyv, nzv = (int(_input['nx']), int(_input['ny']),
+                                 int(_input['nz']))
+                nvox = nxv * nyv * nzv
+                zeros_l = torch.zeros(nvox, device=device, dtype=torch.long)
+                _input['pore_labels'] = zeros_l
+                _input['merged_maxima_ids'] = merged_maxima_ids
+                _input['markers'] = merged_maxima_ids
+                _input['num_pores'] = 0
+                _input['clusters_radaii'] = grid_radaii[merged_maxima_ids]
+                _input['clusters_cart_positions'] = grid[merged_maxima_ids]
+                _input['periodic_label_map'] = zeros_l.clone()
+                _input['periodic_pairs'] = torch.empty(0, 2, device=device,
+                                                       dtype=torch.long)
+                _input['pore_labels_before_pbc'] = zeros_l.clone()
+                _input['centers_before_pbc'] = merged_maxima_ids.clone()
+                _input['center_distances'] = torch.empty(0, 0, device=device)
+                _input['safe_radaii'] = torch.empty(0, device=device)
+                _input['safe_mask'] = torch.zeros(nvox, device=device,
+                                                  dtype=torch.bool)
+                _input['flood_iterations'] = 0
+                return _input
 
         if safe_buffer < 0:
                 raise ValueError('Safe buffer cannot be negative.')
