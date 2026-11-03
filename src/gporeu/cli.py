@@ -581,17 +581,27 @@ def expand_inputs(paths):
     for p in paths:
         p = Path(p)
         if p.is_dir():
-            found = sorted(p.glob('*.cif')) + sorted(p.glob('*.[Cc][Ii][Ff]'))
-            uniq = []
-            for f in found:
-                # skip duplicates, broken symlinks, non-regular entries
-                if f in uniq or not f.is_file():
+            # one scandir pass with cached DirEntry type checks; an "f in
+            # uniq" membership test over lists of paths is O(n^2) and cost
+            # ~25 s for a 20k-file directory.
+            found = []
+            try:
+                entries = list(os.scandir(p))
+            except OSError as exc:
+                raise FileNotFoundError(f'input not found: {p}') from exc
+            for e in entries:
+                if not e.name.lower().endswith('.cif'):
                     continue
-                uniq.append(f)
-            if not uniq:
+                try:
+                    if e.is_file():   # follows symlinks; broken link -> False
+                        found.append(p / e.name)
+                except OSError:
+                    pass
+            found.sort(key=lambda q: q.name)
+            if not found:
                 print(f'warning: no .cif files found in {p}',
                       file=sys.stderr)
-            cif_files.extend(uniq)
+            cif_files.extend(found)
         elif p.is_file():
             cif_files.append(p)
         else:
@@ -599,7 +609,7 @@ def expand_inputs(paths):
     # stable, de-duplicated order
     out, seen = [], set()
     for f in cif_files:
-        r = f.resolve()
+        r = os.path.realpath(f)
         if r not in seen:
             seen.add(r)
             out.append(f)

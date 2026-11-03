@@ -38,15 +38,18 @@ def GPoreU_PSD_Kernel(
     BLOCK_RP: tl.constexpr,
     BLOCK_C: tl.constexpr,
 ):
-    """2D program grid: (random-point chunk) x (candidate chunk).
+    """2D program grid: (candidate chunk) x (random-point chunk).
 
-    ``cand_ptr`` holds the compacted indices of candidate grid points
-    (free with radius > 0).  Programs combine through ``tl.atomic_max`` on
-    the (nonnegative) per-point output.  The comparison keeps the
-    sqrt-then-compare form so boundary points resolve bit-identically.
+    The candidate axis is program-axis 0 (gridX, max ~2^31): dense grids
+    at fine spacings give far more candidate points than CUDA's gridY
+    cap of 65535 blocks allows.  ``cand_ptr`` holds the compacted
+    indices of candidate grid points (free with radius > 0).  Programs
+    combine through ``tl.atomic_max`` on the (nonnegative) per-point
+    output.  The comparison keeps the sqrt-then-compare form so
+    boundary points resolve bit-identically.
     """
-    pid_r = tl.program_id(0)
-    pid_c = tl.program_id(1)
+    pid_c = tl.program_id(0)
+    pid_r = tl.program_id(1)
 
     rp_offs = pid_r * BLOCK_RP + tl.arange(0, BLOCK_RP)[:, None]
     rmask = rp_offs < N_RP
@@ -150,7 +153,7 @@ def GPoreU_psd_ffv(_input):
     if N_CAND:
         BRP = 8
         BC = 256
-        grid2d = (triton.cdiv(N_RP, BRP), triton.cdiv(N_CAND, BC))
+        grid2d = (triton.cdiv(N_CAND, BC), triton.cdiv(N_RP, BRP))
         GPoreU_PSD_Kernel[grid2d](
             N_CAND, N_RP, rand_points, cand, pore_out, cell_flat, grid,
             rad.contiguous(), BLOCK_RP=BRP, BLOCK_C=BC, num_warps=2)
