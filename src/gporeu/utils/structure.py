@@ -86,8 +86,6 @@ def fill_uc(coord, numbers, cell,  charges, types, sg='P 1'):
     return coord, numbers, charges, types, np.array(cell)
 
 
-_SYMMETRY_TAGS = ('_symmetry_equiv_pos',)
-
 def _symbol_to_z(sym, label):
     import re as _re
     s = _re.sub(r'[^A-Za-z]', '', sym or '')
@@ -103,6 +101,29 @@ def _symbol_to_z(sym, label):
     if key in chemical_symbols:
         return chemical_symbols.index(key)
     raise ValueError('unknown element ' + repr(sym))
+
+
+def _cif_cells(line):
+    """Split a CIF content line on whitespace, keeping quoted strings
+    whole even when they contain spaces (e.g. 'x, y, z')."""
+    out, tok, quote = [], '', None
+    for ch in line:
+        if quote:
+            tok += ch
+            if ch == quote:
+                quote = None
+        elif ch in '\'"':
+            quote = ch
+            tok += ch
+        elif ch.isspace():
+            if tok:
+                out.append(tok)
+                tok = ''
+        else:
+            tok += ch
+    if tok:
+        out.append(tok)
+    return out
 
 
 def _fast_read_cif(fpath):
@@ -135,7 +156,7 @@ def _fast_read_cif(fpath):
                 while (j < n and txt[j].strip()
                        and txt[j].strip() not in ('loop_', '#')
                        and not txt[j].strip().startswith('_')):
-                    rows.append(txt[j].split())
+                    rows.append(_cif_cells(txt[j]))
                     j += 1
             i = j
             continue
@@ -147,9 +168,11 @@ def _fast_read_cif(fpath):
     # are accepted ONLY if every operation is the identity; anything else
     # must go through Open Babel so expansion happens as before.
     def _is_identity(op):
-        s = op.lower().replace(' ', '').replace('+', '')
-        s = s.strip('\'"').rstrip('.;')
-        return s == 'x,y,z'
+        # normalise: drop quotes, spaces, unary '+', and explicit zeros so
+        # that 'x, y, z', '+x,+y,+z' and 'x+0, y+0, z+0' all read as x,y,z
+        s = op.strip('\'"').lower()
+        s = s.replace(' ', '').replace('+', '').replace('0', '')
+        return s.rstrip('.;') == 'x,y,z'
     for h in list(cols):
         if 'symop_operation' in h or 'symmetry_xyz' in h:
             for r in rows:
@@ -173,25 +196,19 @@ def _fast_read_cif(fpath):
                     while j < len(txt) and txt[j].strip() \
                             and txt[j].strip() != 'loop_' \
                             and not txt[j].strip().startswith('_'):
-                        cells = txt[j].split()
+                        cells = _cif_cells(txt[j])
                         if single:
                             if not _is_identity(txt[j].strip()):
                                 raise ValueError(
                                     'non-identity symmetry operation')
                         else:
                             for m in symcol:
-                                if m < len(cells):
-                                    c = cells[m]
-                                    # a quoted op containing spaces would
-                                    # have been split; be conservative and
-                                    # defer that file to Open Babel
-                                    if c[:1] in '\'"' and c[-1:] != c[:1]:
-                                        raise ValueError(
-                                            'unparsable symmetry operation')
-                                    if not _is_identity(c):
-                                        raise ValueError(
-                                            'non-identity symmetry '
-                                            'operation')
+                                if m >= len(cells):
+                                    raise ValueError('short symmetry row')
+                                if not _is_identity(cells[m]):
+                                    raise ValueError(
+                                        'non-identity symmetry '
+                                        'operation')
                         j += 1
                 k = j
                 continue
@@ -219,9 +236,19 @@ def _fast_read_cif(fpath):
     if not all(k in cols for k in keys):
         raise ValueError('no coordinates')
 
+    # Columns that MUST have a value in every row; anything further
+    # right (e.g. a charge that some rows omit) defaults instead.
+    need = list(keys) + [k for k in ('_atom_site_type_symbol',
+                                     '_atom_site_label') if k in cols]
+    wide = max(cols[k] for k in need)
+    for r in rows:
+        if len(r) <= wide:
+            raise ValueError('ragged atom_site rows')
+
     coord = np.empty((len(rows), 3), dtype=np.float64)
     numbers = np.empty(len(rows), dtype=np.int64)
     types, charges = [], []
+    ccol = cols.get('_atom_site_charge')
     for r_i, r in enumerate(rows):
         p = np.array([float(r[cols[k]]) for k in keys], dtype=np.float64)
         coord[r_i] = p @ cell if usef else p
@@ -231,8 +258,8 @@ def _fast_read_cif(fpath):
             if '_atom_site_label' in cols else ''
         numbers[r_i] = _symbol_to_z(sym, lbl)
         types.append(sym or lbl)
-        charges.append(float(r[cols['_atom_site_charge']])
-                       if '_atom_site_charge' in cols else 0.0)
+        charges.append(float(r[ccol])
+                       if ccol is not None and len(r) > ccol else 0.0)
 
     return coord, numbers, types, charges, cell
 
@@ -246,9 +273,10 @@ def read_cif(fpath, _id=None, check_duplicates=True):
     operations -- or any parse hiccup -- fall through to Open Babel.
     """
     try:
-        raw = open(fpath).read()
-        if not any(tag in raw for tag in _SYMMETRY_TAGS):
-            return _fast_read_cif(fpath)
+        # The fast parser accepts symmetry-operator loops whose operations
+        # are all identity (the common PACMAN/P1 pattern) and raises for
+        # anything else, so gate on the parse itself, not on tag presence.
+        return _fast_read_cif(fpath)
     except Exception:
         pass
 

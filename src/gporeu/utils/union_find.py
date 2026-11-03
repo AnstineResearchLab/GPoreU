@@ -228,9 +228,9 @@ def _ms_ballot(best_ptr, ru_ptr, rv_ptr, ballot_ptr, N, BLOCK: tl.constexpr):
 
 # do_not_specialize: per-structure sizes must not fragment the Triton
 # JIT cache (value-specialized ints/constexpr each compile a fresh binary).
-@triton.jit(do_not_specialize=["N", "E"])
+@triton.jit(do_not_specialize=["N", "E", "wshift"])
 def _ms_hook(par_ptr, best_ptr, ballot_ptr, ru_ptr, rv_ptr, prog_ptr,
-             ew_ptr, N, E, BLOCK: tl.constexpr):
+             ew_ptr, wshift, N, E, BLOCK: tl.constexpr):
     pid = tl.program_id(0)
     r = pid * BLOCK + tl.arange(0, BLOCK)
     m = r < N
@@ -256,7 +256,7 @@ def _ms_hook(par_ptr, best_ptr, ballot_ptr, ru_ptr, rv_ptr, prog_ptr,
         tl.atomic_add(prog_ptr + 1, bad)
 
     wbits = (b >> 32).to(tl.int32)
-    w = wbits.to(tl.float32, bitcast=True)
+    w = wbits.to(tl.float32, bitcast=True) + wshift
     tl.store(ew_ptr + c, w, mask=tok)
 
 
@@ -288,8 +288,18 @@ def max_st(N, u, v, w, max_rounds=200):
     u = u.contiguous().to(torch.int32)
     v = v.contiguous().to(torch.int32)
     w = w.contiguous().float()
-    assert torch.all(w >= 0), 'packing requires nonnegative weights'
+    # The best-edge pack needs nonnegative weights: float32 bit patterns of
+    # negative weights have the sign bit set, which flips the packed key's
+    # signed order and stalls Boruvka.  Ranking on a shifted copy preserves
+    # the weight order exactly (IEEE subtraction is monotone); _ms_hook
+    # un-shifts the output weights, which stay exact when none was needed.
     E = u.numel()
+    wshift = float(w.min()) if E else 0.0
+    if wshift < 0.0:
+        wsort = w - wshift
+    else:
+        wshift = 0.0
+        wsort = w
 
     par = torch.arange(N, device=device, dtype=torch.int32)
     ew = torch.zeros(N, device=device, dtype=torch.float32)
@@ -319,13 +329,13 @@ def max_st(N, u, v, w, max_rounds=200):
                 raise RuntimeError('chain overflow in maxST find')
         cnt.zero_()
         best.fill_(-1)
-        _ms_best[grid](ru, rv, w, best, cnt, E, BLOCK=BLOCK, num_warps=4)
+        _ms_best[grid](ru, rv, wsort, best, cnt, E, BLOCK=BLOCK, num_warps=4)
         if int(cnt[0]) == 0:
             break
         ballot.fill_(-1)
         _ms_ballot[gridn](best, ru, rv, ballot, N, BLOCK=BLOCK, num_warps=4)
         prog.zero_()
-        _ms_hook[gridn](par, best, ballot, ru, rv, prog, ew, N, E,
+        _ms_hook[gridn](par, best, ballot, ru, rv, prog, ew, wshift, N, E,
                         BLOCK=BLOCK, num_warps=4)
         merges, failed = int(prog[0]), int(prog[1])
         if failed:

@@ -148,8 +148,9 @@ def _best_kernel(ru_ptr, rv_ptr, w_ptr, best_ptr, cnt_ptr, E,
     tl.atomic_add(cnt_ptr, tl.sum(cross.to(tl.int32), axis=0))
     bits = w.to(tl.uint32, bitcast=True).to(tl.int64)
     pack = (bits << 32) | i.to(tl.int64)
-    # weights are provably >= 0 (accessible points), so signed ordering of
-    # `pack` matches weight ordering. Neutral lanes contribute -1: a no-op.
+    # weights are nonnegative by the caller's rank shift, so signed
+    # ordering of `pack` matches weight ordering.  Neutral lanes contribute
+    # -1: a no-op.
     pack = tl.where(cross, pack, -1)
     tl.atomic_max(best_ptr + ru, pack)
     tl.atomic_max(best_ptr + rv, pack)
@@ -296,6 +297,14 @@ def pld_winding_fast(radii, ij_geo, ij_geo_periodic, nx, ny, nz,
     assert u.is_contiguous() and v.is_contiguous() and W.is_contiguous()
     E = u.numel()
     w = torch.minimum(radii[u], radii[v])
+    # The best-edge pack needs nonnegative weights: float32 bit patterns of
+    # negative weights have the sign bit set, which flips the packed key's
+    # signed order and stalls Boruvka on the handful of tiny-negative
+    # radii that float rounding produces at boundary grid points.
+    # Ranking on a shifted copy preserves the weight ORDER exactly (IEEE
+    # subtraction is monotone), and every reported value still uses w.
+    wmin = float(w.min()) if E else 0.0
+    wsort = (w - wmin) if wmin < 0.0 else w
 
     # W as [3, E] planes for coalesced kernel access
     Wp = torch.empty(3, E, device=device, dtype=torch.int32)
@@ -347,7 +356,7 @@ def pld_winding_fast(radii, ij_geo, ij_geo_periodic, nx, ny, nz,
         _find()
         cnt.zero_()
         best.fill_(-1)
-        _best_kernel[grid](ru, rv, w, best, cnt, E, BLOCK=BLOCK,
+        _best_kernel[grid](ru, rv, wsort, best, cnt, E, BLOCK=BLOCK,
                            num_warps=4)
         ncross = int(cnt[0])
         if ncross == 0:
