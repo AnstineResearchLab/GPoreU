@@ -74,9 +74,11 @@ def _find_kernel(u_ptr, v_ptr, par_ptr, pot_ptr,
                  E, nstride, maxh, ofl_ptr, BLOCK: tl.constexpr):
     """Roots and potentials for every edge endpoint.
 
-    Branch-free fixed-hop walk: a lane that reached its root keeps
-    self-loading the (stable) identity entry while tl.where freezes its
-    state.  Sets *ofl_ptr if any chain outlives maxh.
+    Fixed-hop walk with per-lane freeze: a lane that reached its root
+    stops loading (its lanes are masked out of every subsequent load),
+    and the whole program exits once all lanes are done -- identical
+    results to a full-iteration walk because frozen lanes self-load.
+    Sets *ofl_ptr if any chain outlives maxh.
     """
     pid = tl.program_id(0)
     i = pid * BLOCK + tl.arange(0, BLOCK)
@@ -93,31 +95,38 @@ def _find_kernel(u_ptr, v_ptr, par_ptr, pot_ptr,
     du0 = ~m
     dv0 = ~m
 
-    for _hop in range(maxh):
-        pru = tl.load(par_ptr + ru, mask=m, other=0)
-        prv = tl.load(par_ptr + rv, mask=m, other=0)
-        du = (pru == ru) | (~m)
-        dv = (prv == rv) | (~m)
+    hop = 0
+    while (hop < maxh) & (tl.min((du0 & dv0).to(tl.int32), axis=0) == 0):
+        au = m & ~du0
+        av = m & ~dv0
+        pru = tl.load(par_ptr + ru, mask=au, other=0)
+        prv = tl.load(par_ptr + rv, mask=av, other=0)
+        du = (pru == ru) | (~au)
+        dv = (prv == rv) | (~av)
+        # pot loads only for lanes that actually advance this hop
+        ku = au & (~du)
+        kv = av & (~dv)
         au0 = tl.where(du | du0, au0,
-                       au0 + tl.load(pot_ptr + ru, mask=m, other=0))
+                       au0 + tl.load(pot_ptr + ru, mask=ku, other=0))
         au1 = tl.where(du | du0, au1,
-                       au1 + tl.load(pot_ptr + nstride + ru, mask=m,
+                       au1 + tl.load(pot_ptr + nstride + ru, mask=ku,
                                      other=0))
         au2 = tl.where(du | du0, au2,
-                       au2 + tl.load(pot_ptr + 2 * nstride + ru, mask=m,
+                       au2 + tl.load(pot_ptr + 2 * nstride + ru, mask=ku,
                                      other=0))
         av0 = tl.where(dv | dv0, av0,
-                       av0 + tl.load(pot_ptr + rv, mask=m, other=0))
+                       av0 + tl.load(pot_ptr + rv, mask=kv, other=0))
         av1 = tl.where(dv | dv0, av1,
-                       av1 + tl.load(pot_ptr + nstride + rv, mask=m,
+                       av1 + tl.load(pot_ptr + nstride + rv, mask=kv,
                                      other=0))
         av2 = tl.where(dv | dv0, av2,
-                       av2 + tl.load(pot_ptr + 2 * nstride + rv, mask=m,
+                       av2 + tl.load(pot_ptr + 2 * nstride + rv, mask=kv,
                                      other=0))
         ru = tl.where(du | du0, ru, pru)
         rv = tl.where(dv | dv0, rv, prv)
         du0 = du0 | du
         dv0 = dv0 | dv
+        hop += 1
 
     ofl = tl.max(tl.where((~du0 | ~dv0) & m, 1, 0).to(tl.int32), axis=0)
     tl.atomic_max(ofl_ptr, ofl)
@@ -135,9 +144,10 @@ def _find_kernel(u_ptr, v_ptr, par_ptr, pot_ptr,
 # do_not_specialize: per-structure sizes must not fragment the Triton
 # JIT cache (value-specialized ints/constexpr each compile a fresh binary).
 @triton.jit(do_not_specialize=["E"])
-def _best_kernel(ru_ptr, rv_ptr, w_ptr, best_ptr, cnt_ptr, E,
+def _best_kernel(ru_ptr, rv_ptr, w_ptr, best_ptr, cnt_ptr, cross_ptr, E,
                  BLOCK: tl.constexpr):
-    """Heaviest crossing edge per component; count crossing edges."""
+    """Heaviest crossing edge per component; count crossing edges and
+    emit per-edge cross flags for the driver's dead-edge retirement."""
     pid = tl.program_id(0)
     i = pid * BLOCK + tl.arange(0, BLOCK)
     m = i < E
@@ -145,6 +155,7 @@ def _best_kernel(ru_ptr, rv_ptr, w_ptr, best_ptr, cnt_ptr, E,
     rv = tl.load(rv_ptr + i, mask=m, other=0)
     w = tl.load(w_ptr + i, mask=m, other=0.0)
     cross = m & (ru != rv)
+    tl.store(cross_ptr + i, cross.to(tl.int8), mask=m)
     tl.atomic_add(cnt_ptr, tl.sum(cross.to(tl.int32), axis=0))
     bits = w.to(tl.uint32, bitcast=True).to(tl.int64)
     pack = (bits << 32) | i.to(tl.int64)
@@ -258,11 +269,13 @@ def bonds_from_pairs(ij_geo, ij_geo_periodic, nx, ny, nz, device='cuda'):
     lifted lattice both advance the axis index by +1, hence W = +e_axis
     for both classes, recovered from the (signed) linear-index difference.
     """
-    e_int = ij_geo.to(device=device, dtype=torch.int64)
-    e_per = ij_geo_periodic.to(device=device, dtype=torch.int64)
+    e_int = ij_geo.to(device=device, dtype=torch.int32)
+    e_per = ij_geo_periodic.to(device=device, dtype=torch.int32)
     both = torch.cat([e_int, e_per], dim=0) if e_per.numel() else e_int
     # The kernels take raw pointers, so require contiguous storage:
     # plain [:, 0] views carry stride 2 and would be misread.
+    # int32 index space: grid points and bonds both stay < 2^31 for any
+    # grid a GPU can hold (checked by the caller).
     u, v = both[:, 0].contiguous(), both[:, 1].contiguous()
     d = v - u
     sx, sy, sz = ny * nz, nz, 1
@@ -296,6 +309,11 @@ def pld_winding_fast(radii, ij_geo, ij_geo_periodic, nx, ny, nz,
     # than misreading memory.
     assert u.is_contiguous() and v.is_contiguous() and W.is_contiguous()
     E = u.numel()
+    n = nx * ny * nz
+    # int32 index/lane space (halves walk/best/ballot traffic vs int64):
+    # any grid that fits on a GPU is far below this bound.
+    if n >= 2**31 or E >= 2**31:
+        raise RuntimeError('pld: grid/bond count exceeds int32 index space')
     w = torch.minimum(radii[u], radii[v])
     # The best-edge pack needs nonnegative weights: float32 bit patterns of
     # negative weights have the sign bit set, which flips the packed key's
@@ -313,11 +331,10 @@ def pld_winding_fast(radii, ij_geo, ij_geo_periodic, nx, ny, nz,
     Wp[2] = W[:, 2]
     del W
 
-    n = nx * ny * nz
-    par = torch.arange(n, device=device, dtype=torch.int64)
+    par = torch.arange(n, device=device, dtype=torch.int32)
     pot = torch.zeros(3, n, device=device, dtype=torch.int32)
-    ru = torch.empty(E, device=device, dtype=torch.int64)
-    rv = torch.empty(E, device=device, dtype=torch.int64)
+    ru = torch.empty(E, device=device, dtype=torch.int32)
+    rv = torch.empty(E, device=device, dtype=torch.int32)
     pu = torch.empty(3, E, device=device, dtype=torch.int32)
     pv = torch.empty(3, E, device=device, dtype=torch.int32)
     best = torch.empty(n, device=device, dtype=torch.int64)
@@ -327,7 +344,7 @@ def pld_winding_fast(radii, ij_geo, ij_geo_periodic, nx, ny, nz,
     ofl = torch.zeros(1, device=device, dtype=torch.int32)
 
     BLOCK = 512
-    grid = (triton.cdiv(E, BLOCK),)
+    grid_full = (triton.cdiv(E, BLOCK),)
     gridn = (triton.cdiv(n, BLOCK),)
 
     torch.cuda.synchronize()
@@ -337,27 +354,39 @@ def pld_winding_fast(radii, ij_geo, ij_geo_periodic, nx, ny, nz,
         max_rounds = 200
     rounds = 0
 
-    def _find():
+    # Active-edge compaction: the best kernel's per-edge cross flags mark
+    # which edges still cross; an edge whose endpoints share a root can
+    # never cross again (unions never split), and the lattice graph
+    # collapses to a few percent of its edges within rounds.  Find / best
+    # / hook then run on the active set only; the final pass reconstructs
+    # potentials for EVERY original edge before scoring.
+    cross = torch.ones(E, device=device, dtype=torch.int8)
+    Ea = E
+    ua, va, wa, wpa = u, v, wsort, Wp
+
+    hcap = 16
+
+    def _find(edges_u, edges_v, E_arg, grid):
         # Adaptive hop budget: chains grow <= 1 link/phase, so 16 is usually
         # plenty; the overflow flag doubles the budget and retries.
         nonlocal hcap
         while True:
             ofl.zero_()
-            _find_kernel[grid](u, v, par, pot, ru, rv, pu, pv, E, n, hcap,
-                               ofl, BLOCK=BLOCK, num_warps=4)
+            _find_kernel[grid](edges_u, edges_v, par, pot, ru, rv, pu, pv,
+                               E_arg, n, hcap, ofl, BLOCK=BLOCK, num_warps=4)
             if int(ofl[0]) == 0:
                 return
             hcap *= 4
             if hcap > 8192:
                 raise RuntimeError('find chain overflow in Boruvka forest')
 
-    hcap = 16
     while True:
-        _find()
+        grid_a = (triton.cdiv(Ea, BLOCK),) if Ea else (1,)
+        _find(ua, va, Ea, grid_a)
         cnt.zero_()
         best.fill_(-1)
-        _best_kernel[grid](ru, rv, wsort, best, cnt, E, BLOCK=BLOCK,
-                           num_warps=4)
+        _best_kernel[grid_a](ru, rv, wa, best, cnt, cross, Ea, BLOCK=BLOCK,
+                             num_warps=4)
         ncross = int(cnt[0])
         if ncross == 0:
             break
@@ -365,8 +394,8 @@ def pld_winding_fast(radii, ij_geo, ij_geo_periodic, nx, ny, nz,
         _ballot_kernel[gridn](best, ru, rv, ballot, n, BLOCK=BLOCK,
                               num_warps=4)
         prog.zero_()
-        _hook_kernel[gridn](par, pot, best, ballot, prog, Wp, ru, rv, pu,
-                            pv, n, E, n, BLOCK=BLOCK, num_warps=4)
+        _hook_kernel[gridn](par, pot, best, ballot, prog, wpa, ru, rv, pu,
+                            pv, n, Ea, n, BLOCK=BLOCK, num_warps=4)
         merges, failed = int(prog[0]), int(prog[1])
         rounds += 1
         if failed:
@@ -377,13 +406,24 @@ def pld_winding_fast(radii, ij_geo, ij_geo_periodic, nx, ny, nz,
                                f'merge after {rounds} rounds')
         if rounds >= max_rounds:
             raise RuntimeError(f'Boruvka PLD exceeded {max_rounds} rounds')
+        if ncross < Ea and Ea >= 300_000:
+            # Only worth it once the per-round scan is large: the gather
+            # costs a handful of extra launches, which would outweigh the
+            # saved scanning for small structures.
+            keep = cross[:Ea] == 1
+            ua = ua[:Ea][keep].contiguous()
+            va = va[:Ea][keep].contiguous()
+            wa = wa[:Ea][keep].contiguous()
+            wpa = torch.stack((wpa[0][:Ea][keep], wpa[1][:Ea][keep],
+                               wpa[2][:Ea][keep]), 0).contiguous()
+            Ea = ncross
     torch.cuda.synchronize()
     t_kruskal = time.perf_counter()
 
-    # final positions + winding residuals
-    _find()
+    # final positions + winding residuals, over every original edge
+    _find(u, v, E, grid_full)
     g = torch.empty(3, E, device=device, dtype=torch.int32)
-    _score_kernel[grid](pu, pv, Wp, g, E, BLOCK=BLOCK, num_warps=4)
+    _score_kernel[grid_full](pu, pv, Wp, g, E, BLOCK=BLOCK, num_warps=4)
     torch.cuda.synchronize()
     t_score = time.perf_counter()
 

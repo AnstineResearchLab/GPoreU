@@ -23,10 +23,13 @@ import triton.language as tl
 # do_not_specialize: per-structure sizes must not fragment the Triton
 # JIT cache (value-specialized ints/constexpr each compile a fresh binary).
 @triton.jit(do_not_specialize=["E", "maxh"])
-def _cc_merge_kernel(u_ptr, v_ptr, par_ptr, prog_ptr, ofl_ptr, E, maxh,
-                     BLOCK: tl.constexpr):
+def _cc_merge_kernel(u_ptr, v_ptr, par_ptr, prog_ptr, ofl_ptr, cross_ptr,
+                     E, maxh, BLOCK: tl.constexpr):
     """Find both endpoint roots; crossing edges link min-root under
-    max-root via CAS.  Counts crossings (termination) and successes."""
+    max-root via CAS.  Counts crossings (termination) and successes.
+    Per-edge cross flags (valid only after a fully converged launch)
+    let the driver retire edges whose endpoints are already joined --
+    they can never cross again."""
     pid = tl.program_id(0)
     i = pid * BLOCK + tl.arange(0, BLOCK)
     m = i < E
@@ -34,17 +37,21 @@ def _cc_merge_kernel(u_ptr, v_ptr, par_ptr, prog_ptr, ofl_ptr, E, maxh,
     ru = tl.load(u_ptr + i, mask=m, other=0)
     rv = tl.load(v_ptr + i, mask=m, other=0)
 
-    au0 = tl.zeros([BLOCK], dtype=tl.int32)   # finished-lane flags
-    av0 = ~m
-    for _hop in range(maxh):
-        pru = tl.load(par_ptr + ru, mask=m, other=0)
-        prv = tl.load(par_ptr + rv, mask=m, other=0)
-        du = (pru == ru) | (~m)
-        dv = (prv == rv) | (~m)
+    au0 = m == 0   # "u-walk finished" flags (inactive lanes start done)
+    av0 = m == 0
+    hop = 0
+    while (hop < maxh) & (tl.min((au0 & av0).to(tl.int32), axis=0) == 0):
+        au = m & ~au0
+        av = m & ~av0
+        pru = tl.load(par_ptr + ru, mask=au, other=0)
+        prv = tl.load(par_ptr + rv, mask=av, other=0)
+        du = (pru == ru) | (~au)
+        dv = (prv == rv) | (~av)
         ru = tl.where(du | au0, ru, pru)
         rv = tl.where(dv | av0, rv, prv)
         au0 = au0 | du
         av0 = av0 | dv
+        hop += 1
 
     tl.atomic_max(ofl_ptr, tl.max(tl.where((~au0 | ~av0) & m, 1, 0).to(tl.int32),
                                   axis=0))
@@ -53,6 +60,7 @@ def _cc_merge_kernel(u_ptr, v_ptr, par_ptr, prog_ptr, ofl_ptr, E, maxh,
     # truncated walks would fabricate crossings and stale links.
     conv = au0 & av0 & m
     cross = conv & (ru != rv)
+    tl.store(cross_ptr + i, cross.to(tl.int8), mask=m)
     tl.atomic_add(prog_ptr + 1, tl.sum(cross.to(tl.int32), axis=0))
 
     c = tl.minimum(ru, rv)
@@ -75,11 +83,14 @@ def _cc_final_kernel(par_ptr, root_ptr, N, maxh, ofl_ptr, BLOCK: tl.constexpr):
     m = i < N
     r = i
     done = ~m
-    for _hop in range(maxh):
-        p = tl.load(par_ptr + r, mask=m, other=0)
-        d = (p == r) | (~m)
+    hop = 0
+    while (hop < maxh) & (tl.min(done.to(tl.int32), axis=0) == 0):
+        act = m & ~done
+        p = tl.load(par_ptr + r, mask=act, other=0)
+        d = (p == r) | (~act)
         r = tl.where(d | done, r, p)
         done = done | d
+        hop += 1
     tl.atomic_max(ofl_ptr, tl.max(tl.where(~done & m, 1, 0).to(tl.int32),
                                   axis=0))
     tl.store(root_ptr + i, r, mask=m)
@@ -114,20 +125,23 @@ def components(N, u, v, max_rounds=200):
     E = u.numel()
     par = torch.arange(N, device=device, dtype=torch.int32)
     BLOCK = 1024
-    grid = (triton.cdiv(E, BLOCK),) if E else (1,)
+    gridn = (triton.cdiv(N, BLOCK),)
+    if E == 0:
+        return par.to(torch.int64)
 
     prog = torch.zeros(3, device=device, dtype=torch.int32)  # merges,cross,ofl
-    gridn = (triton.cdiv(N, BLOCK),)
+    cross = torch.ones(E, device=device, dtype=torch.int8)
 
     rounds = 0
     while True:
+        grid = (triton.cdiv(E, BLOCK),)
         _split_kernel[gridn](par, N, BLOCK=BLOCK, num_warps=4)
         hcap = 16
         while True:
             # fresh counters per launch: only a fully-converged launch has
             # meaningful crossing/merge totals (the termination predicate).
             prog.zero_()
-            _cc_merge_kernel[grid](u, v, par, prog, prog[2:], E, hcap,
+            _cc_merge_kernel[grid](u, v, par, prog, prog[2:], cross, E, hcap,
                                    BLOCK=BLOCK, num_warps=4)
             ctr = prog.cpu()          # single host sync per attempt
             if int(ctr[2]) == 0:
@@ -143,6 +157,17 @@ def components(N, u, v, max_rounds=200):
             raise RuntimeError(f'CC stalled with {ncross} crossings')
         if rounds >= max_rounds:
             raise RuntimeError('CC exceeded max rounds')
+        # Retire edges proven non-crossing on this converged launch: their
+        # endpoints share a component, which no later merge can undo.  A
+        # 6-neighbour lattice graph collapses to a few percent of its edges
+        # within rounds, after which find/CAS would only rescan dead lanes.
+        if ncross < E and E >= 300_000:
+            # (same size gate as PLD compaction: the gathers' extra launches
+            # only pay for themselves once a round's scan is substantial)
+            keep = cross[:E] == 1
+            u = u[:E][keep].contiguous()
+            v = v[:E][keep].contiguous()
+            E = ncross
 
     root = torch.empty(N, device=device, dtype=torch.int64)
     hcap = 16
@@ -172,15 +197,19 @@ def _ms_find(u_ptr, v_ptr, par_ptr, ru_ptr, rv_ptr, E, maxh, ofl_ptr,
     rv = tl.load(v_ptr + i, mask=m, other=0)
     au0 = ~m
     av0 = ~m
-    for _hop in range(maxh):
-        pru = tl.load(par_ptr + ru, mask=m, other=0)
-        prv = tl.load(par_ptr + rv, mask=m, other=0)
-        du = (pru == ru) | (~m)
-        dv = (prv == rv) | (~m)
+    hop = 0
+    while (hop < maxh) & (tl.min((au0 & av0).to(tl.int32), axis=0) == 0):
+        au = m & ~au0
+        av = m & ~av0
+        pru = tl.load(par_ptr + ru, mask=au, other=0)
+        prv = tl.load(par_ptr + rv, mask=av, other=0)
+        du = (pru == ru) | (~au)
+        dv = (prv == rv) | (~av)
         ru = tl.where(du | au0, ru, pru)
         rv = tl.where(dv | av0, rv, prv)
         au0 = au0 | du
         av0 = av0 | dv
+        hop += 1
     tl.atomic_max(ofl_ptr, tl.max(tl.where((~au0 | ~av0) & m, 1, 0).to(tl.int32),
                                   axis=0))
     tl.store(ru_ptr + i, ru, mask=m)
