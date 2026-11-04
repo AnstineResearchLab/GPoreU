@@ -81,8 +81,20 @@ def _step_psd(data, cfg):
 
 
 def _step_surface_area(data, cfg):
+    import torch
     from .surface_area import GPoreU_SA
-    data.update(GPoreU_SA(data))
+    nacc = data.get('n_access')
+    kw = {}
+    if nacc is not None:
+        # network-restricted surface (N2-probe percolating network),
+        # same lattice convention as the analysis grid
+        lengths = torch.linalg.norm(data['cell'], dim=1)
+        h = float(cfg['grid_spacing'])
+        frac = (nacc.new_tensor([h, h, h], dtype=torch.float64)
+                / lengths.double()).contiguous()
+        kw = dict(network=nacc, frac_steps=frac,
+                  dims=(int(data['nx']), int(data['ny']), int(data['nz'])))
+    data.update(GPoreU_SA(data, **kw))
 
 
 def _step_network(data, cfg):
@@ -431,6 +443,27 @@ def format_summary(data, cif_path, cfg, requested, steps, timings):
         sa = float(data['total_surface_area'].item())
         L.append(f'  surface area       : {sa:10.1f} A^2/cell   '
                  f'{sa / m3g * 1e4:8.2f} m^2/g')
+
+    # PoreBlazer-style network-accessible block: every quantity summed
+    # only over points whose lattice node lies on the N2-probe network
+    # (the percolating clusters of the N2-accessible region).  Available
+    # whenever the connectivity step ran alongside the source methods.
+    if 'connectivity' in steps and 'net_v_po' in data:
+        vpo = float(data['net_v_po'])
+        vg = float(data['net_v_g'])
+        vh = float(data['net_v_he'])
+        L.append('  network (N2 probe) :')
+        L.append(f'     V_PO  N2-occupiable : {vpo:10.2f} A^3   '
+                 f'{grav(vpo):6.3f} cm^3/g   '
+                 f'FV_PO {float(data["net_fv_po"]):.4f}')
+        L.append(f'     V_G   geometric     : {vg:10.2f} A^3   '
+                 f'{grav(vg):6.3f} cm^3/g')
+        L.append(f'     V_He                : {vh:10.2f} A^3   '
+                 f'{grav(vh):6.3f} cm^3/g')
+        if 'network_surface_area' in data:
+            san = float(data['network_surface_area'].item())
+            L.append(f'     S_AC                : {san:10.1f} A^2/cell   '
+                     f'{san / m3g * 1e4:8.2f} m^2/g')
 
     if 'pore_network' in req:
         npores = int(data['num_pores'])

@@ -23,7 +23,7 @@ SAMPLES_PER_ATOM = 512
 
 # do_not_specialize: per-structure sizes must not fragment the Triton
 # JIT cache (value-specialized ints/constexpr each compile a fresh binary).
-@triton.jit(do_not_specialize=["NATOMS"])
+@triton.jit(do_not_specialize=["NATOMS", "NX", "NY", "NZ", "FU", "FV", "FW"])
 def GPoreU_SA_Kernel(
     coord_ptr,
     sigmas_ptr,
@@ -33,9 +33,13 @@ def GPoreU_SA_Kernel(
     n_sigma_ptr,
     accessible_count_ptr,
     surface_radius_ptr,
+    net_ptr,
+    NX, NY, NZ,
+    FU, FV, FW,
     NATOMS,
     SAMP: tl.constexpr,
     BLOCK_ATOMS: tl.constexpr,
+    NET: tl.constexpr,
 ):
     """2D program grid: (atom, sample chunk).
 
@@ -44,6 +48,12 @@ def GPoreU_SA_Kernel(
     tile).  Per-atom accessible counts accumulate through integer-valued
     atomic adds, so accessible_count is exact.  The host atom itself
     never blocks its own samples (idx != pid).
+
+    With NET=True a sample additionally needs its nearest lattice node to
+    belong to the network mask at net_ptr (network-restricted surface:
+    a probe centre positioned at the sample point must sit on the
+    selected connectivity network).  FU/FV/FW are the lattice fractional
+    spacings along the three axes.
     """
     pid = tl.program_id(0)
     chunk = tl.program_id(1)
@@ -146,18 +156,39 @@ def GPoreU_SA_Kernel(
                                        keep_dims=True)
 
     accessible = blocked == 0
+    if NET:
+        # nearest lattice node of each sample point (row-vector fractional
+        # convention, wrap into [0,1), round to node index modulo axis
+        # points; node planes 0 and nx-1 are periodic duplicates).
+        gx = inv00 * surface_point_x + inv10 * surface_point_y \
+            + inv20 * surface_point_z
+        gy = inv01 * surface_point_x + inv11 * surface_point_y \
+            + inv21 * surface_point_z
+        gz = inv02 * surface_point_x + inv12 * surface_point_y \
+            + inv22 * surface_point_z
+        i = ((gx - tl.floor(gx)) / FU + 0.5).to(tl.int32) % NX
+        j = ((gy - tl.floor(gy)) / FV + 0.5).to(tl.int32) % NY
+        k = ((gz - tl.floor(gz)) / FW + 0.5).to(tl.int32) % NZ
+        node = tl.load(net_ptr + (i * NY + j) * NZ + k) != 0
+        accessible = accessible & node
     partial = tl.sum(accessible.to(tl.int32), axis=0)
     partial = tl.sum(partial, axis=0)
     tl.atomic_add(accessible_count_ptr + pid, partial.to(tl.float32))
     tl.store(surface_radius_ptr + pid, surface_radius)
 
 
-def GPoreU_SA(_input):
+def GPoreU_SA(_input, network=None, frac_steps=None, dims=None):
     """Compute the accessible surface area (A^2 per cell); returns
-    ``{'total_surface_area': tensor}``.
+    ``{'total_surface_area': tensor}``, plus ``'network_surface_area'``
+    when ``network`` (a boolean per-lattice-point mask, flat nx*ny*nz)
+    is given.  The network surface reuses the SAME Monte-Carlo samples
+    and only additionally requires each sample point's nearest lattice
+    node to lie on that network (e.g. the N2-probe percolating network),
+    so it is a strict per-sample subset of the total.
 
     Requires ``coord``, ``cell``, ``sigmas``, ``n_sigma`` and ``trials``
-    from the prepared input.
+    from the prepared input; with a network also ``frac_steps`` =
+    [du, dv, dw] lattice fractional spacings and ``dims`` = (nx, ny, nz).
     """
     coord = _input['coord']
     cell = _input['cell']
@@ -185,13 +216,33 @@ def GPoreU_SA(_input):
     GPoreU_SA_Kernel[grid](
         coord, sigmas, rand1, rand2, cell_flat, n_sigma,
         accessible_count, surface_radius,
-        NATOMS=NATOMS, SAMP=SAMP, BLOCK_ATOMS=128, num_warps=4)
+        accessible_count, 1, 1, 1, 1.0, 1.0, 1.0,     # unused (NET=False)
+        NATOMS=NATOMS, SAMP=SAMP, BLOCK_ATOMS=128, NET=False, num_warps=4)
 
     sfrac = accessible_count / SAMPLES_PER_ATOM
     surface_area_per_atom = 4.0 * torch.pi * surface_radius ** 2
     full_surface_area = torch.sum(surface_area_per_atom)
     accessible_surface_area_per_atom = surface_area_per_atom * sfrac
     total_surface_area = torch.sum(accessible_surface_area_per_atom)
+
+    _out = dict(total_surface_area=total_surface_area)
+
+    if network is not None:
+        # Same MC samples (rand1/rand2), network-restricted: per-atom
+        # counts can only shrink, so net <= total exactly and the
+        # comparison is free of sampling mismatch.
+        assert network.dtype == torch.bool and network.is_contiguous()
+        net_count = torch.zeros(NATOMS, device='cuda', dtype=torch.float32)
+        nx, ny, nz = dims
+        GPoreU_SA_Kernel[grid](
+            coord, sigmas, rand1, rand2, cell_flat, n_sigma,
+            net_count, surface_radius,
+            network, nx, ny, nz,
+            float(frac_steps[0]), float(frac_steps[1]), float(frac_steps[2]),
+            NATOMS=NATOMS, SAMP=SAMP, BLOCK_ATOMS=128, NET=True,
+            num_warps=4)
+        _out['network_surface_area'] = torch.sum(
+            surface_area_per_atom * (net_count / SAMPLES_PER_ATOM))
 
     prof.vprint("-------------- SURFACE AREA ---------------")
     prof.vprint("NATOMS:", NATOMS)
@@ -204,4 +255,4 @@ def GPoreU_SA(_input):
                 (total_surface_area / full_surface_area).item())
     prof.vprint("--------------------------------------------")
 
-    return dict(total_surface_area=total_surface_area)
+    return _out

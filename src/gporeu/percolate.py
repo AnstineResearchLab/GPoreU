@@ -59,6 +59,17 @@ def GPoreU_percolate(_input):
           access_geo_pore_volume=geo_volume(geo_clusters, volume)
     else:
          access_geo_pore_volume=0.0
+    # Network-accessible volumes on the N2-probe network (PoreBlazer's
+    # "network accessible" columns): every quantity summed only over
+    # points whose probe sits on the N2 percolating clusters.
+    NGRID   = nx * ny * nz
+    n_net   = n_clusters
+    v_po_net    = volume * n_net.sum(dtype=torch.float64)             / NGRID
+    net_v_g     = volume * (geo_clusters & n_net).sum(dtype=torch.float64) / NGRID
+    _he_on_net  = he_clusters & n_net
+    net_fv_po   = n_net.sum(dtype=torch.float64) / NGRID
+    net_v_he    = (volume * torch.exp(-4.0 * he_lj_energy[_he_on_net]
+                                      / 298.0).sum() / NGRID)
     # Collect results.
     _out = dict(ij_geo                =                ij_geo,
                 ij_geo_periodic       =       ij_geo_periodic,
@@ -75,7 +86,11 @@ def GPoreU_percolate(_input):
                 n_perc_y              =              n_perc_y,
                 n_perc_z              =              n_perc_z,
                 access_he_pore_volume = access_he_pore_volume,
-                access_geo_pore_volume=access_geo_pore_volume)
+                access_geo_pore_volume=access_geo_pore_volume,
+                net_v_po              =              v_po_net,
+                net_fv_po             =              net_fv_po,
+                net_v_g               =              net_v_g,
+                net_v_he              =              net_v_he)
     return _out
 
 def ij_pairs(O: torch.Tensor):
