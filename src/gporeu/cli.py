@@ -472,9 +472,11 @@ def format_summary(data, cif_path, cfg, requested, steps, timings):
                 else float('nan'))
         L.append(f'  pore network       : {npores} pore(s); largest pore '
                  f'radius ~{rmax:.2f} A')
+        before = (int(data['centers_before_pbc'].numel())
+                  if 'centers_before_pbc' in data else npores)
         L.append(f'     floods {int(data["flood_iterations"])} sweeps; '
-                 f'{int(data["periodic_pairs"].shape[0])} periodic '
-                 f'center merges')
+                 f'{before} pore(s) before PBC -> {npores} after periodic '
+                 f'grouping')
 
     if 'pld' in req or 'lcd' in req:
         if 'pld' in data:

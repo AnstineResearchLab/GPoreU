@@ -25,204 +25,171 @@ import triton.language as tl
 from .utils import prof
 from .utils.union_find import components, max_st
 
-def GPoreU_apply_pbc(pore_labels, merged_maxima_ids, grid_radaii, wall_thickness, grid_spacing):
-        """Merge pore labels/centers identified across periodic boundaries.
+def GPoreU_apply_pbc(pore_labels, merged_maxima_ids, grid_radaii,
+                     wall_thickness, grid_spacing, cell):
+        """Merge pore labels/centers identified across periodic boundaries,
+            following the PoroNet grouping convention.
 
-        Wall contact counts drive a sequential merge on the CPU using pure
-        integer and float32 comparisons (exact for the value ranges
-        involved: threshold tests against 0.5 do not flip between fp32 and
-        fp64 for wall areas below 4e6 cells).  This avoids ~3 kernel
-        launches and synchronizations per candidate pair.  Results are
-        returned as device tensors.
+        For every axis the wall slab of ``wall_thickness`` (measured with
+        the PERPENDICULAR cell length like PoroNet, so tilted cells get
+        the right number of planes) is MIRRORED against the opposite
+        wall, so plane i pairs with its wrap-neighbour plane n-1-i.  A
+        pair of regions co-occurring across such a wall pair is accepted
+        when more than half of either region's wall pixels find the same
+        partner on the other side AND the maxima positions look like one
+        region viewed through the boundary: both maxima inside the facing
+        walls, or exactly one inside and that region is the smaller of
+        the two (a cap split off a big region is absorbed by it).
+        Accepted pairs are unioned into connected components (PBC
+        groups).  One center survives per component - the widest center,
+        smallest label on radius ties - voxels are relabeled 1..K, and
+        the PoroNet counting convention holds: maxima before PBC,
+        connected components of those regions after PBC.
         """
 
         import numpy as np
         prof.mark('  pbc:enter')
 
-# General dimensions
         nx, ny, nz = pore_labels.shape
         device = pore_labels.device
+        dims = np.array((nx, ny, nz), dtype=np.int64)
 
-        wall_cells = math.ceil(wall_thickness / grid_spacing)
-
-        if wall_cells < 1 or wall_cells > min(nx, ny, nz):
-                raise ValueError('Wall thickness must select between 1 and the smallest grid dimension.')
-
+        # Wall thickness in planes per axis, from the face-to-face
+        # (perpendicular) cell lengths, exactly as PoroNet computes them.
+        cell_np = cell.detach().cpu().numpy().astype(np.float64)
+        eA, eB, eC = cell_np
+        vol = abs(float(np.dot(eA, np.cross(eB, eC))))
+        lperp = np.array([vol / np.linalg.norm(np.cross(eB, eC)),
+                          vol / np.linalg.norm(np.cross(eC, eA)),
+                          vol / np.linalg.norm(np.cross(eA, eB))])
+        wt = float(wall_thickness.item() if torch.is_tensor(wall_thickness)
+                   else wall_thickness)
+        wall_cells = np.clip(np.ceil(wt / lperp * dims).astype(np.int64),
+                             1, dims - 1)
         prof.mark('  pbc:prepared')
-# Pull the (small) center bookkeeping to CPU
-        lab_np = pore_labels.detach().cpu().numpy()
+
+        lab_np = pore_labels.detach().cpu().numpy().reshape(-1)
         rad_np = grid_radaii.reshape(-1).detach().cpu().numpy()
-
-# Get center labels, radii, and positions
-        center_labels = lab_np.reshape(-1)[merged_maxima_ids.detach().cpu().numpy().astype(np.int64)]
-        center_radii = rad_np[merged_maxima_ids.detach().cpu().numpy().astype(np.int64)]
-
         merged_ids_np = merged_maxima_ids.detach().cpu().numpy().astype(np.int64)
-        center_x = merged_ids_np // (ny * nz)
-        center_y = (merged_ids_np % (ny * nz)) // nz
-        center_z = merged_ids_np % nz
 
-        center_positions = np.stack((center_x, center_y, center_z), axis=1)
+        center_labels = lab_np[merged_ids_np]
+        center_radii = rad_np[merged_ids_np]
+        center_pos = np.stack((merged_ids_np // (ny * nz),
+                               (merged_ids_np % (ny * nz)) // nz,
+                               merged_ids_np % nz), axis=1)
 
-
-# Sort labels and keep their corresponding data together
-        center_order = np.argsort(center_labels, kind='stable')
-
-        center_labels = center_labels[center_order]
-        center_radii = center_radii[center_order]
-        center_positions = center_positions[center_order]
-        merged_maxima_np = merged_ids_np[center_order]
-
-        all_merge_pairs = []
-
-
+        order = np.argsort(center_labels, kind='stable')
+        center_labels = center_labels[order]
+        center_radii = center_radii[order]
+        center_pos = center_pos[order]
+        merged_maxima_np = merged_ids_np[order]
         prof.mark('  pbc:cpu-copied')
-# Check all three dimensions
-        for dimension in range(3):
 
-                if dimension == 0:
-                        left_wall = lab_np[:wall_cells, :, :]
-                        right_wall = lab_np[-wall_cells:, :, :]
-                        dimension_size = nx
+        accepted = []
+        for a in range(3):
+            n = int(dims[a])
+            w = int(wall_cells[a])
 
-                elif dimension == 1:
-                        left_wall = lab_np[:, :wall_cells, :]
-                        right_wall = lab_np[:, -wall_cells:, :]
-                        dimension_size = ny
+            left = np.take(lab_np.reshape(nx, ny, nz),
+                           np.arange(0, w), axis=a).reshape(-1)
+            right = np.flip(np.take(lab_np.reshape(nx, ny, nz),
+                                    np.arange(n - w, n), axis=a),
+                            axis=a).reshape(-1)
 
-                else:
-                        left_wall = lab_np[:, :, :wall_cells]
-                        right_wall = lab_np[:, :, -wall_cells:]
-                        dimension_size = nz
+            lmax = int(max(left.max(initial=0), right.max(initial=0))) + 1
+            keys = left.astype(np.int64) * lmax + right.astype(np.int64)
+            ukeys, pair_counts = np.unique(keys, return_counts=True)
+            pairs = np.stack((ukeys // lmax, ukeys % lmax), axis=1)
+            valid = (pairs[:, 0] > 0) & (pairs[:, 1] > 0) \
+                  & (pairs[:, 0] != pairs[:, 1])
+            pairs, pair_counts = pairs[valid], pair_counts[valid]
+            if pairs.shape[0] == 0:
+                continue
 
+            # Two-sided overlap fractions; keep co-occurrences where
+            # either direction exceeds one half (PoroNet pick_these).
+            lvals, ltot = np.unique(left, return_counts=True)
+            rvals, rtot = np.unique(right, return_counts=True)
+            lfrac = (pair_counts / ltot[np.searchsorted(lvals, pairs[:, 0])])
+            rfrac = (pair_counts / rtot[np.searchsorted(rvals, pairs[:, 1])])
+            keep = (lfrac > 0.5) | (rfrac > 0.5)
+            pairs = pairs[keep]
+            if pairs.shape[0] == 0:
+                continue
 
-# Count labels across the extracted layers
-                left_labels, left_counts = np.unique(left_wall, return_counts=True)
-                right_labels, right_counts = np.unique(right_wall, return_counts=True)
-
-
-# Count pairwise label co-occurrences across the pair.  Key-encoded 1D
-# uniques: BIG exceeds any pore label, so numeric key order equals
-# lexicographic order of the (left, right) label pairs exactly.
-                l_flat = left_wall.reshape(-1)
-                r_flat = right_wall.reshape(-1)
-                lmax = int(max(l_flat.max(initial=0), r_flat.max(initial=0))) + 1
-                keys = l_flat.astype(np.int64) * lmax + r_flat.astype(np.int64)
-                ukeys, pair_counts = np.unique(keys, return_counts=True)
-                unique_pairs = np.stack((ukeys // lmax, ukeys % lmax), axis=1)
-
-                valid = (unique_pairs[:, 0] > 0) & (unique_pairs[:, 1] > 0) & (unique_pairs[:, 0] != unique_pairs[:, 1])
-
-                unique_pairs = unique_pairs[valid]
-                pair_counts = pair_counts[valid]
-
-
-# Get total wall counts for each label in each pair
-                left_index = np.searchsorted(left_labels, unique_pairs[:, 0])
-                right_index = np.searchsorted(right_labels, unique_pairs[:, 1])
-
-                left_total = left_counts[left_index].astype(np.float64)
-                right_total = right_counts[right_index].astype(np.float64)
-
-                left_fraction = pair_counts.astype(np.float64) / left_total
-                right_fraction = pair_counts.astype(np.float64) / right_total
-
-                overlap_check = (left_fraction > 0.5) | (right_fraction > 0.5)
-                passed_pairs = unique_pairs[overlap_check]
-
-
-# Get corresponding center radii and positions
-                left_index = np.searchsorted(center_labels, passed_pairs[:, 0])
-                right_index = np.searchsorted(center_labels, passed_pairs[:, 1])
-
-                left_radius = center_radii[left_index]
-                right_radius = center_radii[right_index]
-
-                left_close = center_positions[left_index, dimension] < wall_cells
-                right_close = center_positions[right_index, dimension] >= dimension_size - wall_cells
-
-
-# Merge the smaller pore only if its center is close
-                merge_left = left_close & (left_radius < right_radius)
-                merge_right = right_close & (right_radius < left_radius)
-
-                left_into_right = passed_pairs[merge_left]
-                right_into_left = np.stack((passed_pairs[merge_right, 1], passed_pairs[merge_right, 0]), axis=1)
-
-                dimension_merge_pairs = np.concatenate((left_into_right, right_into_left), axis=0)
-                all_merge_pairs.append(dimension_merge_pairs)
-
+            # Maxima-position acceptance: both inside the facing walls,
+            # or one-sided with the one-sided region the smaller cap.
+            li = np.searchsorted(center_labels, pairs[:, 0])
+            ri = np.searchsorted(center_labels, pairs[:, 1])
+            fL = center_pos[li, a] < w
+            fR = center_pos[ri, a] > n - w
+            both = fL & fR
+            xor = fL ^ fR
+            one_rad = np.where(fL, center_radii[li], center_radii[ri])
+            oth_rad = np.where(fL, center_radii[ri], center_radii[li])
+            absorb = xor & (one_rad < oth_rad)
+            keep = both | absorb
+            pairs = pairs[keep]
+            if pairs.shape[0] > 0:
+                accepted.append(pairs)
 
         prof.mark('  pbc:walls')
-# Combine directed pairs from all dimensions
-        if all_merge_pairs:
-                periodic_pairs_np = np.concatenate(all_merge_pairs, axis=0)
+
+        if accepted:
+            edges = np.unique(np.concatenate(accepted, axis=0), axis=0)
         else:
-                periodic_pairs_np = np.zeros((0, 2), dtype=np.int64)
-        if periodic_pairs_np.shape[0]:
-                b2 = int(periodic_pairs_np.max(initial=0)) + 1
-                k2 = (periodic_pairs_np[:, 0].astype(np.int64) * b2
-                      + periodic_pairs_np[:, 1].astype(np.int64))
-                uk2 = np.unique(k2)
-                periodic_pairs_np = np.stack((uk2 // b2, uk2 % b2), axis=1)
+            edges = np.zeros((0, 2), dtype=np.int64)
 
+        # Connected components over region labels (PBC groups).
+        maxlab = int(center_labels.max(initial=0))
+        uf = np.arange(maxlab + 1)
 
-# Track the surviving original label for each pore
-        merged_labels = center_labels.copy()
+        def find(x):
+            while uf[x] != x:
+                uf[x] = uf[uf[x]]
+                x = uf[x]
+            return x
 
-        for row in range(periodic_pairs_np.shape[0]):
+        for p0, p1 in edges:
+            r0, r1 = find(int(p0)), find(int(p1))
+            if r0 != r1:
+                uf[r0] = r1
 
-                p0 = periodic_pairs_np[row, 0]
-                p1 = periodic_pairs_np[row, 1]
+        groups = np.array([find(int(l)) for l in center_labels], dtype=np.int64)
 
-                smaller_index = np.searchsorted(center_labels, p0)
-                larger_index = np.searchsorted(center_labels, p1)
-
-                smaller_label = merged_labels[smaller_index]
-                larger_label = merged_labels[larger_index]
-
-
-# Compare surviving centers when earlier merges have joined groups
-                smaller_index = np.searchsorted(center_labels, smaller_label)
-                larger_index = np.searchsorted(center_labels, larger_label)
-
-                keep_smaller = center_radii[smaller_index] > center_radii[larger_index]
-                equal_radius = center_radii[smaller_index] == center_radii[larger_index]
-                keep_smaller = bool(keep_smaller) or (bool(equal_radius) and smaller_label < larger_label)
-
-                keep_label = smaller_label if keep_smaller else larger_label
-                remove_label = larger_label if keep_smaller else smaller_label
-
-                merged_labels[merged_labels == remove_label] = keep_label
-
-
+        # Group survivor: maximum radius, smallest label on ties.
+        leader = center_labels.copy()
+        gs = np.lexsort((center_labels, groups))
+        i = 0
+        while i < gs.size:
+            j = i + 1
+            while j < gs.size and groups[gs[j]] == groups[gs[i]]:
+                j += 1
+            seg = gs[i:j]
+            winner = seg[np.lexsort((center_labels[seg],
+                                     -center_radii[seg]))[0]]
+            leader[seg] = center_labels[winner]
+            i = j
+        merged_labels = leader
         prof.mark('  pbc:merge-loop')
-# Keep one center per merged group
+
         surviving_labels = np.unique(merged_labels)
         keep_centers = np.isin(center_labels, surviving_labels)
-
         merged_maxima_np = merged_maxima_np[keep_centers]
 
-
-# Number the final pores from 1 onward
-        final_labels = np.searchsorted(surviving_labels, merged_labels)
-        final_labels = final_labels + 1
-
-
-# Map original labels to final labels, with background remaining zero
-        periodic_label_map_np = np.zeros(int(center_labels.max()) + 1, dtype=np.int64)
+        final_labels = np.searchsorted(surviving_labels, merged_labels) + 1
+        periodic_label_map_np = np.zeros(maxlab + 1, dtype=np.int64)
         periodic_label_map_np[center_labels] = final_labels
-
-
-# Update voxel labels
         pore_labels_np = periodic_label_map_np[lab_np]
-
         prof.mark('  pbc:renumbered')
-        pore_labels = torch.from_numpy(np.ascontiguousarray(pore_labels_np)).to(device)
-        merged_maxima_ids = torch.from_numpy(np.ascontiguousarray(merged_maxima_np)).to(device)
-        periodic_label_map = torch.from_numpy(np.ascontiguousarray(periodic_label_map_np)).to(device)
-        periodic_pairs = torch.from_numpy(np.ascontiguousarray(periodic_pairs_np)).to(device)
 
+        pore_labels = torch.from_numpy(
+            np.ascontiguousarray(pore_labels_np.reshape(nx, ny, nz))).to(device)
+        merged_maxima_ids = torch.from_numpy(
+            np.ascontiguousarray(merged_maxima_np)).to(device)
+        periodic_label_map = torch.from_numpy(
+            np.ascontiguousarray(periodic_label_map_np)).to(device)
+        periodic_pairs = torch.from_numpy(np.ascontiguousarray(edges)).to(device)
         prof.mark('  pbc:returned')
         return pore_labels, merged_maxima_ids, periodic_label_map, periodic_pairs
 
@@ -514,7 +481,7 @@ def GPoreU_safe_watershed(_input, merged_maxima_ids, wall_thickness, grid_spacin
 
 
 # Merge pores across periodic walls
-        pore_labels, merged_maxima_ids, periodic_label_map, periodic_pairs = GPoreU_apply_pbc(pore_labels, merged_maxima_ids, grid_radaii, wall_thickness, grid_spacing)
+        pore_labels, merged_maxima_ids, periodic_label_map, periodic_pairs = GPoreU_apply_pbc(pore_labels, merged_maxima_ids, grid_radaii, wall_thickness, grid_spacing, _input['cell'])
 
         prof.mark('ws:apply-pbc')
         num_pores = merged_maxima_ids.numel()
