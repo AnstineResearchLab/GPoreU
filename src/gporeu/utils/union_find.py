@@ -259,7 +259,7 @@ def _ms_ballot(best_ptr, ru_ptr, rv_ptr, ballot_ptr, N, BLOCK: tl.constexpr):
 # JIT cache (value-specialized ints/constexpr each compile a fresh binary).
 @triton.jit(do_not_specialize=["N", "E", "wshift"])
 def _ms_hook(par_ptr, best_ptr, ballot_ptr, ru_ptr, rv_ptr, prog_ptr,
-             ew_ptr, wshift, N, E, BLOCK: tl.constexpr):
+             ew_ptr, lk_ptr, wshift, N, E, BLOCK: tl.constexpr):
     pid = tl.program_id(0)
     r = pid * BLOCK + tl.arange(0, BLOCK)
     m = r < N
@@ -287,32 +287,40 @@ def _ms_hook(par_ptr, best_ptr, ballot_ptr, ru_ptr, rv_ptr, prog_ptr,
     wbits = (b >> 32).to(tl.int32)
     w = wbits.to(tl.float32, bitcast=True) + wshift
     tl.store(ew_ptr + c, w, mask=tok)
+    # The link joins the two ROOTS, which are arbitrary representative
+    # vertices, not generally adjacent in the graph.  Remember the accepted
+    # edge's index so the exported forest contains its true endpoints;
+    # a root loses at most once, so this store races with nothing.
+    tl.store(lk_ptr + c, e, mask=tok)
 
 
 # do_not_specialize: per-structure sizes must not fragment the Triton
 # JIT cache (value-specialized ints/constexpr each compile a fresh binary).
 @triton.jit(do_not_specialize=["N"])
-def _ms_edges(par_ptr, ew_ptr, src_ptr, dst_ptr, w_ptr, nout_ptr, N,
-              BLOCK: tl.constexpr):
+def _ms_edges(u_ptr, v_ptr, lk_ptr, ew_ptr, src_ptr, dst_ptr, w_ptr, nout_ptr,
+              N, BLOCK: tl.constexpr):
     pid = tl.program_id(0)
     r = pid * BLOCK + tl.arange(0, BLOCK)
     m = r < N
-    p = tl.load(par_ptr + r, mask=m, other=0)
-    is_edge = m & (p != r)
+    lk = tl.load(lk_ptr + r, mask=m, other=-1)
+    is_edge = m & (lk >= 0)
     k = tl.atomic_add(nout_ptr, tl.sum(is_edge.to(tl.int32), axis=0))
     # exclusive scan within this block
     cum = tl.cumsum(is_edge.to(tl.int32), axis=0) - 1
     pos = k + cum
     pos = tl.where(is_edge, pos, 0)
-    tl.store(src_ptr + pos, r, mask=is_edge)
-    tl.store(dst_ptr + pos, p, mask=is_edge)
+    tl.store(src_ptr + pos, tl.load(u_ptr + lk, mask=is_edge, other=0),
+             mask=is_edge)
+    tl.store(dst_ptr + pos, tl.load(v_ptr + lk, mask=is_edge, other=0),
+             mask=is_edge)
     tl.store(w_ptr + pos, tl.load(ew_ptr + r, mask=is_edge, other=0.0),
              mask=is_edge)
 
 
 def max_st(N, u, v, w, max_rounds=200):
-    """Maximum spanning forest via Boruvka; returns (src, dst, w) where the
-    edge arrays carry the ACTUAL crossing-edge weights used for each link."""
+    """Maximum spanning forest via Boruvka; returns (src, dst, w) — the
+    accepted edges verbatim from the input graph, carrying the ACTUAL
+    crossing-edge endpoints and weights used for each link."""
     device = u.device
     u = u.contiguous().to(torch.int32)
     v = v.contiguous().to(torch.int32)
@@ -332,6 +340,7 @@ def max_st(N, u, v, w, max_rounds=200):
 
     par = torch.arange(N, device=device, dtype=torch.int32)
     ew = torch.zeros(N, device=device, dtype=torch.float32)
+    lk = torch.full((N,), -1, device=device, dtype=torch.int32)
     ru = torch.empty(E, device=device, dtype=torch.int32)
     rv = torch.empty(E, device=device, dtype=torch.int32)
     best = torch.empty(N, device=device, dtype=torch.int64)
@@ -364,7 +373,7 @@ def max_st(N, u, v, w, max_rounds=200):
         ballot.fill_(-1)
         _ms_ballot[gridn](best, ru, rv, ballot, N, BLOCK=BLOCK, num_warps=4)
         prog.zero_()
-        _ms_hook[gridn](par, best, ballot, ru, rv, prog, ew, wshift, N, E,
+        _ms_hook[gridn](par, best, ballot, ru, rv, prog, ew, lk, wshift, N, E,
                         BLOCK=BLOCK, num_warps=4)
         merges, failed = int(prog[0]), int(prog[1])
         if failed:
@@ -379,7 +388,7 @@ def max_st(N, u, v, w, max_rounds=200):
     dst = torch.empty(N, device=device, dtype=torch.int32)
     we = torch.empty(N, device=device, dtype=torch.float32)
     nout = torch.zeros(1, device=device, dtype=torch.int32)
-    _ms_edges[gridn](par, ew, src, dst, we, nout, N, BLOCK=BLOCK,
+    _ms_edges[gridn](u, v, lk, ew, src, dst, we, nout, N, BLOCK=BLOCK,
                      num_warps=4)
     k = int(nout[0])
     return src[:k].long(), dst[:k].long(), we[:k]
